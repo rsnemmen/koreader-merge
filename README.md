@@ -1,14 +1,59 @@
+# KOReader Sidecar Merger
+
+⚠️Unstable and untested, v0.01
+
+A utility script to merge KOReader notes/highlights files (sidecar `.lua` files from `.sdr` directories) from multiple devices or locations.
+
+## Purpose
+
+When reading the same book on multiple devices with KOReader, each device creates its own `metadata.*.lua` sidecar file containing highlights, bookmarks, and notes. This script merges those files into a single unified annotation file.
+
+It ignores display settings, avoiding conflicts between devices with different screen sizes.
+
 ## Usage
 
 ```bash
-# Basic usage
-python merge_koreader.py phone.lua tablet.lua ereader.lua -o merged.lua
-
-# With verbose output
-python merge_koreader.py phone.lua tablet.lua -o merged.lua -v
+python koreader_merge.py <file1.lua> <file2.lua> [file3.lua ...] -o <output.lua>
 ```
 
-## What the script does
+### Example
+
+```bash
+python koreader_merge.py \
+  ~/kindle/book.sdr/metadata.epub.lua \
+  ~/kobo/book.sdr/metadata.epub.lua \
+  -o ~/synced/book.sdr/metadata.epub.lua
+```
+
+## Behavior
+
+- **Merged**: Highlights, bookmarks, notes, and reading progress
+- **Deduplicated**: Identical annotations are not duplicated
+- **Not preserved**: Display settings (font size, margins, line spacing, etc.)
+
+When opening a book with the merged file, KOReader applies settings in this order: 1. Per-book sidecar settings → 2. Directory defaults → 3. Global defaults
+
+Since display settings are not merged, KOReader will fall back to your configured defaults.
+
+## Requirements
+
+- Python 3.6+
+- No external dependencies
+
+## Disclaimer
+
+This is a vibe-coded script generated with Claude Opus 4.5. Untested and unstable. Proceed carefully.
+
+TODO  
+- [ ] test
+	- [ ] diff original files with output
+	- [ ] test back in one of the devices
+- [ ] release on github
+- [ ] homebrew
+
+## Appendix
+
+### What the script does in more details
 
 **Parsing**: Implements a complete Lua table parser that handles strings (with escape sequences and line continuations), numbers, booleans, nil, and nested tables.
 
@@ -20,13 +65,13 @@ python merge_koreader.py phone.lua tablet.lua -o merged.lua -v
 
 **Stats**: Recalculates highlight and note counts based on the merged data.
 
-## The original prompt
+### The original prompt
 
 write a python script that takes as input (command-line arguments) the LUA files for the same book, written by different KOReader apps in different devices. 
 
 the script should combine the notes and highlights from the different files, and produce a LUA file with the joint notes and annotations. it should not include display settings in this output.
 
-## What is KOReader's behavior when it opens a book and its LUA file does not have display settings?
+### What is KOReader's behavior when it opens a book and its LUA file does not have display settings?
 
 Based on the search results, when KOReader opens a book and its sidecar (metadata.lua) file is missing display settings, it uses a fallback system:
 
