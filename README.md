@@ -4,7 +4,7 @@ A utility script to merge KOReader notes/highlights files (sidecar `.lua` files 
 
 ---
 **WARNING**  
-⚠️Use this at your discretion and always make backups of your books and KOReader files/notes etc.
+⚠️Use this at your discretion and always make backups of your books and KOReader files/notes etc. This has been tested with EPUB and PDF books, and gave satisfactory results (see Tests below).
 
 ---
 
@@ -46,21 +46,21 @@ Since display settings are not merged, KOReader will fall back to your configure
 
 ## Tests
 
-- [x] ePub book with notes from Palma 2 and Go 7 color. Preserves highlights colors and notes. 
-- [ ] PDF book
+- [x] ePub book with notes from Palma 2 and Go 7 color. BlueStacks emulator. Preserves highlights colors and notes. 
+- [x] PDF book with notes from Palma 2 and Go 7 color. BlueStacks emulator.  Preserves highlights colors and notes. 
 
 
 ## TODO  
 
 I need more testers.
 
+- [ ] test on actual devices
 - [x] test
 	- [x] diff original files with output
 	- [x] test output in one of the devices
 	- [x] test in android simulator
-- [ ] test PDF book
+- [x] test PDF book
 - [x] release on github
-- [ ] homebrew
 
 
 ## Disclaimers
