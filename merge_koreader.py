@@ -259,6 +259,74 @@ def freeze_for_key(x: Any) -> Any:
     return x
 
 
+def annotation_sort_key(ann: Dict) -> Tuple[int, int, int, float, float, str]:
+    """
+    Total ordering for annotations that is stable across different schemas.
+
+    Always returns:
+      (kind_rank, pageno, pos_page, y, x, datetime)
+
+    No mixed int/str comparisons.
+    """
+    # Prefer pageno; fall back to page; then 0
+    pageno_raw = ann.get("pageno", ann.get("page", 0))
+    try:
+        pageno = int(pageno_raw) if pageno_raw is not None else 0
+    except (TypeError, ValueError):
+        pageno = 0
+
+    # Determine kind:
+    # - PDF highlight-like annotations have pos0/pos1
+    # - "chapter marker" entries in your files have text like "in CHAPTER ..."
+    has_pos = "pos0" in ann and "pos1" in ann
+    is_chapter_marker = (
+        isinstance(ann.get("text"), str)
+        and ann["text"].startswith("in ")
+        and not has_pos
+    )
+
+    # Put real highlights first, then bookmarks/others, then chapter markers (or vice versa if you prefer)
+    if has_pos:
+        kind_rank = 0
+    elif is_chapter_marker:
+        kind_rank = 2
+    else:
+        kind_rank = 1
+
+    pos0 = ann.get("pos0")
+
+    # Defaults for missing/unknown position
+    pos_page = pageno
+    y = 0.0
+    x = 0.0
+
+    if isinstance(pos0, dict):
+        # PDF style
+        try:
+            pos_page = int(pos0.get("page", pageno) or pageno)
+        except (TypeError, ValueError):
+            pos_page = pageno
+
+        try:
+            y = float(pos0.get("y", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            y = 0.0
+
+        try:
+            x = float(pos0.get("x", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            x = 0.0
+
+    # Datetime as final tie-breaker; always string
+    dt = ann.get("datetime_updated", ann.get("datetime", ""))
+    if dt is None:
+        dt = ""
+    else:
+        dt = str(dt)
+
+    return (kind_rank, pageno, pos_page, y, x, dt)
+
+
 def annotation_key(ann: Dict) -> Tuple:
     """Generate a unique key for an annotation to detect duplicates."""
     # For highlights with position data
@@ -291,11 +359,7 @@ def merge_annotations(annotations_list: List[List[Dict]]) -> List[Dict]:
                 merged[key] = ann.copy()
     
     # Sort by page number, then by position
-    result = sorted(merged.values(), key=lambda x: (
-        x.get('pageno', 0),
-        x.get('pos0', ''),
-        x.get('datetime', '')
-    ))
+    result = sorted(merged.values(), key=annotation_sort_key)
     
     return result
 
