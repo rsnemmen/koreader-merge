@@ -243,13 +243,29 @@ def parse_lua_file(filepath: str) -> Dict:
     return result
 
 
+def freeze_for_key(x: Any) -> Any:
+    """
+    Convert potentially unhashable nested structures (dict/list)
+    into hashable equivalents for use in dict/set keys.
+    """
+    if isinstance(x, dict):
+        # Sort items to ensure stable ordering
+        return tuple((freeze_for_key(k), freeze_for_key(v)) for k, v in sorted(x.items(), key=lambda kv: str(kv[0])))
+    if isinstance(x, list):
+        return tuple(freeze_for_key(v) for v in x)
+    if isinstance(x, tuple):
+        return tuple(freeze_for_key(v) for v in x)
+    # ints, floats, strs, bools, None are hashable already
+    return x
+
+
 def annotation_key(ann: Dict) -> Tuple:
     """Generate a unique key for an annotation to detect duplicates."""
     # For highlights with position data
     if 'pos0' in ann and 'pos1' in ann:
-        return ('highlight', ann.get('pos0'), ann.get('pos1'))
+        return ('highlight', freeze_for_key(ann.get('pos0')), freeze_for_key(ann.get('pos1')))
     # For bookmarks without position data, use page location
-    return ('bookmark', ann.get('page'), ann.get('chapter'))
+    return ('bookmark', freeze_for_key(ann.get('page')), freeze_for_key(ann.get('chapter')))
 
 
 def merge_annotations(annotations_list: List[List[Dict]]) -> List[Dict]:
