@@ -52,7 +52,7 @@ Since display settings are not merged, KOReader will fall back to your configure
 
 ## TODO  
 
-I need more testers.
+Additional testing welcome—particularly across different e-reader devices and book formats.
 
 - [ ] test on actual devices
 - [x] test
@@ -65,5 +65,5 @@ I need more testers.
 
 ## Disclaimers
 
-This is a vibe-coded script generated with Claude Opus 4.5. Proceed carefully. 
+This project was developed with AI assistance and would benefit from additional community testing, particularly on physical e-reader devices. Please verify functionality with your backups before regular use. 
 
