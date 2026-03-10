@@ -43,6 +43,32 @@ def parse_lua_string(s: str, pos: int) -> Tuple[str, int]:
                 if pos + 1 < len(s) and s[pos + 1] == '\n':
                     pos += 1
                 result.append('\n')
+            elif escape_char == 'a':
+                result.append('\x07')
+            elif escape_char == 'b':
+                result.append('\x08')
+            elif escape_char == 'f':
+                result.append('\x0c')
+            elif escape_char == 'v':
+                result.append('\x0b')
+            elif escape_char == 'x':
+                # Hex escape \xhh
+                hex_str = s[pos + 1:pos + 3]
+                if len(hex_str) == 2 and all(c in '0123456789abcdefABCDEF' for c in hex_str):
+                    result.append(chr(int(hex_str, 16)))
+                    pos += 2
+                else:
+                    result.append(escape_char)
+            elif escape_char.isdigit():
+                # Decimal escape \ddd (1-3 digits)
+                dec_str = escape_char
+                if pos + 1 < len(s) and s[pos + 1].isdigit():
+                    dec_str += s[pos + 1]
+                    pos += 1
+                    if pos + 1 < len(s) and s[pos + 1].isdigit():
+                        dec_str += s[pos + 1]
+                        pos += 1
+                result.append(chr(int(dec_str)))
             else:
                 result.append(escape_char)
             pos += 1
@@ -187,6 +213,7 @@ def parse_lua_table(s: str, pos: int) -> Tuple[Dict, int]:
             pos += 1
             pos = skip_whitespace_and_comments(s, pos)
             
+            key: Any
             if s[pos] in '"\'':
                 key, pos = parse_lua_string(s, pos)
             else:
@@ -333,22 +360,29 @@ def annotation_key(ann: Dict) -> Tuple:
     if 'pos0' in ann and 'pos1' in ann:
         return ('highlight', freeze_for_key(ann.get('pos0')), freeze_for_key(ann.get('pos1')))
     # For bookmarks without position data, use page location
-    return ('bookmark', freeze_for_key(ann.get('page')), freeze_for_key(ann.get('chapter')))
+    page = ann.get('page') or ann.get('pageno')
+    return ('bookmark', freeze_for_key(page), freeze_for_key(ann.get('chapter')))
 
 
-def merge_annotations(annotations_list: List[List[Dict]]) -> List[Dict]:
-    """Merge annotations from multiple sources, keeping the most recent version."""
-    merged = {}
-    
+def merge_annotations(annotations_list: List[List[Dict]]) -> Tuple[List[Dict], int]:
+    """Merge annotations from multiple sources, keeping the most recent version.
+
+    Returns:
+        A tuple of (merged annotation list, number of duplicates removed).
+    """
+    merged: Dict[Any, Dict] = {}
+    total_input = 0
+
     for annotations in annotations_list:
         for ann in annotations:
+            total_input += 1
             key = annotation_key(ann)
-            
+
             if key in merged:
                 existing = merged[key]
                 existing_dt = existing.get('datetime_updated', existing.get('datetime', ''))
                 new_dt = ann.get('datetime_updated', ann.get('datetime', ''))
-                
+
                 # Keep the more recent one
                 if new_dt > existing_dt:
                     merged[key] = ann.copy()
@@ -357,11 +391,12 @@ def merge_annotations(annotations_list: List[List[Dict]]) -> List[Dict]:
                     merged[key] = ann.copy()
             else:
                 merged[key] = ann.copy()
-    
+
     # Sort by page number, then by position
     result = sorted(merged.values(), key=annotation_sort_key)
-    
-    return result
+    duplicates_removed = total_input - len(result)
+
+    return result, duplicates_removed
 
 
 def lua_escape_string(s: str) -> str:
@@ -378,6 +413,8 @@ def lua_escape_string(s: str) -> str:
             result.append('\\r')
         elif char == '\t':
             result.append('\\t')
+        elif ord(char) < 32:
+            result.append(f'\\{ord(char)}')
         else:
             result.append(char)
     return '"' + ''.join(result) + '"'
@@ -474,7 +511,12 @@ def main():
         action='store_true',
         help='Show detailed information about merged annotations'
     )
-    
+    parser.add_argument(
+        '-n', '--dry-run',
+        action='store_true',
+        help='Show what would be written without actually writing the output file'
+    )
+
     args = parser.parse_args()
     
     if len(args.files) < 1:
@@ -506,34 +548,59 @@ def main():
         if 'annotations' in data:
             annotations = data['annotations']
             if isinstance(annotations, dict):
-                # Convert dict with integer keys to list
+                # Convert dict with integer keys to list; warn about skipped non-integer keys
+                skipped = [k for k in annotations.keys() if not isinstance(k, int)]
+                if skipped:
+                    print(
+                        f"Warning: skipping {len(skipped)} non-integer annotation key(s) in "
+                        f"{args.files[all_data.index(data)]}: {skipped[:5]}",
+                        file=sys.stderr,
+                    )
                 annotations = [annotations[k] for k in sorted(annotations.keys()) if isinstance(k, int)]
             all_annotations.append(annotations)
     
     # Merge annotations
-    merged_annotations = merge_annotations(all_annotations)
-    
+    merged_annotations, duplicates_removed = merge_annotations(all_annotations)
+
     # Count highlights vs bookmarks
     highlights = sum(1 for ann in merged_annotations if 'pos0' in ann)
     bookmarks = len(merged_annotations) - highlights
     notes = sum(1 for ann in merged_annotations if ann.get('note'))
-    
+
     print(f"\nMerged results:")
     print(f"  Total annotations: {len(merged_annotations)}")
     print(f"  Highlights: {highlights}")
     print(f"  Bookmarks: {bookmarks}")
     print(f"  Notes: {notes}")
+    if args.verbose and duplicates_removed > 0:
+        print(f"  Duplicates removed: {duplicates_removed}")
     
     # Convert to dict with integer keys (Lua array format)
     annotations_dict = {i: ann for i, ann in enumerate(merged_annotations, 1)}
     
     # Use first file as source for metadata
     first_data = all_data[0]
-    
+
+    # Pick reading progress from the file with the most recent last_open timestamp
+    progress_source = None
+    best_last_open = ''
+    for d in all_data:
+        last_open = d.get('last_open', '')
+        if last_open and str(last_open) > best_last_open:
+            best_last_open = str(last_open)
+            progress_source = d
+    if progress_source is None:
+        progress_source = first_data
+
     # Build output with only essential data (no display settings)
     output_data = {
         'annotations': annotations_dict,
     }
+
+    # Include reading progress
+    for field in ('current_page', 'percent_finished', 'last_open'):
+        if field in progress_source:
+            output_data[field] = progress_source[field]
     
     # Include document metadata
     if 'doc_pages' in first_data:
@@ -568,16 +635,20 @@ def main():
         summaries.sort(key=lambda x: x.get('modified', ''), reverse=True)
         output_data['summary'] = summaries[0]
     
-    # Generate and write output
+    # Generate output
     output_content = generate_lua_output(output_data)
-    
-    try:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(output_content)
-        print(f"\nOutput written to: {args.output}")
-    except Exception as e:
-        print(f"Error writing output: {e}", file=sys.stderr)
-        sys.exit(1)
+
+    if args.dry_run:
+        print(f"\nDry run — no file written.")
+        print(f"  Would write {len(output_content)} bytes to: {args.output}")
+    else:
+        try:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(output_content)
+            print(f"\nOutput written to: {args.output}")
+        except Exception as e:
+            print(f"Error writing output: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == '__main__':
