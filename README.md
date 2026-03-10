@@ -17,13 +17,15 @@ It ignores display settings, avoiding conflicts between devices with different s
 ## Usage
 
 ```bash
-koreader_merge.py <file1.lua> <file2.lua> [file3.lua ...] -o <output.lua>
+merge_koreader.py <file1.lua> <file2.lua> [file3.lua ...] -o <output.lua>
 ```
+
+Use `-v` for verbose output (shows duplicate count) or `-n` / `--dry-run` to preview without writing.
 
 ### Example
 
 ```bash
-koreader_merge.py \
+merge_koreader.py \
   ~/palma2/book.sdr/metadata.epub.lua \
   ~/go7/book.sdr/metadata.epub.lua \
   -o ~/synced/book.sdr/metadata.epub.lua
