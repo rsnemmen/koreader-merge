@@ -1,7 +1,7 @@
 # Agent Instructions for koreader_merge_highlights
 
 ## Project Overview
-Single-file Python utility (583 lines) that merges KOReader annotation files from multiple devices. No external dependencies, standard library only.
+Single-file Python utility (654 lines) that merges KOReader annotation files from multiple devices. No external dependencies, standard library only.
 
 ## Commands
 
@@ -12,6 +12,9 @@ python merge_koreader.py file1.lua file2.lua -o output.lua
 
 # With verbose output
 python merge_koreader.py file1.lua file2.lua -o output.lua -v
+
+# Dry run (preview without writing)
+python merge_koreader.py file1.lua file2.lua -o output.lua -n
 ```
 
 ### Code Quality
@@ -109,7 +112,7 @@ This project has no formal test suite. When making changes:
 5. Serialize to Lua format and write
 
 ## Important Notes
-- **No display settings merged** - only annotations, bookmarks, notes
+- **No display settings merged** - only annotations, bookmarks, notes, and reading progress
 - **Deduplication** uses annotation position/page as key
 - **Sort order** is deterministic (stable across runs)
 - **Backwards compatibility** with Python 3.6 required

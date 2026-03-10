@@ -28,7 +28,7 @@ ruff format merge_koreader.py
 
 ## Architecture & Data Flow
 
-All logic lives in `merge_koreader.py` (single file, ~583 lines):
+All logic lives in `merge_koreader.py` (single file, ~654 lines):
 
 1. **Parse** — `parse_lua_file()` → `parse_lua_table()` → `parse_lua_value()`: Hand-written recursive Lua parser. Parse functions follow a `(value, new_position)` return tuple pattern.
 2. **Merge** — `merge_annotations()`: Deduplicates using position/page as key (`annotation_key()`), keeps most recent version by `datetime_updated`. Sorted via `annotation_sort_key()` for deterministic output.
