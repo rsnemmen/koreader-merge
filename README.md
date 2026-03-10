@@ -65,5 +65,5 @@ Additional testing welcome—particularly across different e-reader devices and 
 
 ## Disclaimers
 
-This project was developed with AI assistance and would benefit from additional community testing, particularly on physical e-reader devices. Please verify functionality with your backups before regular use. 
+This project would benefit from additional community testing, particularly on physical e-reader devices. Please keep backups of your book annotations. 
 
