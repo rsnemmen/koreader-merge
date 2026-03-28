@@ -4,23 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Single-file Python utility (`merge_koreader.py`) that merges KOReader annotation files (`.lua`) from multiple devices into one. Standard library only for the core merge workflow; `ebooklib` and `weasyprint` are optional dependencies used only when `--render-pdf` is passed. Python 3.6+ compatible.
+Single-file Python utility (`merge_koreader.py`) that merges KOReader annotation files (`.lua`) from multiple devices into one. Standard library only for the core merge workflow; `ebooklib` is optional for `--render-html` and `PyMuPDF` is optional for `--render-pdf`. Uses `python3.13` (conda). Python 3.6+ compatible.
 
 ## Commands
 
 ```bash
 # Merge multiple Lua files
-python merge_koreader.py file1.lua file2.lua -o output.lua
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua
 
 # With verbose output
-python merge_koreader.py file1.lua file2.lua -o output.lua -v
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua -v
 
-# Render epub with colour-coded annotation highlights to PDF (requires ebooklib + weasyprint)
-python merge_koreader.py file1.lua file2.lua -o output.lua --render-pdf --epub mybook.epub
-python merge_koreader.py file1.lua file2.lua -o output.lua --render-pdf --epub mybook.epub --pdf-output annotations.pdf
+# Render epub with colour-coded annotation highlights to HTML (requires ebooklib)
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --render-html --epub mybook.epub
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --epub mybook.epub --html-output annotations.html
+
+# Overlay colour-coded highlights on a PDF (requires PyMuPDF: pip install PyMuPDF)
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --render-pdf --pdf mybook.pdf
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --pdf mybook.pdf --pdf-output annotated.pdf
 
 # Syntax check
-python -m py_compile merge_koreader.py
+python3.13 -m py_compile merge_koreader.py
 
 # Type check
 mypy merge_koreader.py --ignore-missing-imports
@@ -49,4 +53,4 @@ All logic lives in `merge_koreader.py` (single file, ~850 lines):
 - Max line length: 100 characters
 - Double quotes for strings
 - No external dependencies for the core merge path — keep it stdlib-only
-- Optional PDF rendering (`render_annotated_pdf`, `_highlight_text_in_html`) may import `ebooklib` and `weasyprint` lazily at runtime
+- Optional rendering functions import lazily: `render_annotated_html` imports `ebooklib`; `render_annotated_pdf` imports `fitz` (PyMuPDF)

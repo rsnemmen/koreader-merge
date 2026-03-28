@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3.13
 """
 Merge KOReader annotations from multiple devices.
 
@@ -14,6 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Highlight colors for annotations, one per source device (cycles if more than 5)
 DEVICE_COLORS = ["#FFFF99", "#99FFFF", "#FF99CC", "#99FF99", "#FFD699"]
+
+
+def _hex_to_rgb(hex_color: str) -> Tuple[float, float, float]:
+    """Convert '#RRGGBB' hex color to (r, g, b) floats in [0, 1] for PyMuPDF."""
+    h = hex_color.lstrip('#')
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
 
 
 def parse_lua_string(s: str, pos: int) -> Tuple[str, int]:
@@ -796,6 +802,105 @@ def render_annotated_html(
         f.write(full_html)
 
 
+def render_annotated_pdf(
+    pdf_path: str,
+    pdf_output_path: str,
+    annotations: List[Dict],
+    file_list: List[str],
+    verbose: bool = False,
+) -> None:
+    """Render a PDF with colour-coded annotation highlights overlaid per source device.
+
+    Highlights are drawn using the ``pboxes`` bounding boxes from each annotation.
+    A legend page is inserted at the start mapping each colour to its source file.
+    Notes are attached as popup content on the annotation.
+
+    Args:
+        pdf_path: Path to the source PDF file.
+        pdf_output_path: Destination PDF file path.
+        annotations: Merged annotations; each must carry a ``_device_index`` key.
+        file_list: Ordered list of input .lua file paths (used for legend labels).
+        verbose: If True, print per-annotation render status.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print(
+            "Error: --render-pdf requires 'PyMuPDF'.\n"
+            "Install with: pip install PyMuPDF",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    device_colors = {i: DEVICE_COLORS[i % len(DEVICE_COLORS)] for i in range(len(file_list))}
+
+    # Group annotations by page number (1-indexed); skip those without pboxes
+    page_annotations: Dict[int, List[Dict]] = {}
+    for ann in annotations:
+        if not ann.get('pboxes'):
+            continue
+        pageno = ann.get('pageno') or ann.get('page')
+        if pageno is None:
+            continue
+        page_annotations.setdefault(int(pageno), []).append(ann)
+
+    doc = fitz.open(pdf_path)
+    total_pages = doc.page_count
+    rendered = 0
+    skipped_oob = 0
+
+    for pageno, ann_list in page_annotations.items():
+        # PyMuPDF uses 0-indexed pages
+        page_idx = pageno - 1
+        if page_idx < 0 or page_idx >= total_pages:
+            if verbose:
+                print(f"  Warning: page {pageno} out of range (PDF has {total_pages} pages), skipping")
+            skipped_oob += len(ann_list)
+            continue
+
+        page = doc[page_idx]
+        for ann in ann_list:
+            device_idx = ann.get('_device_index', 0)
+            rgb = _hex_to_rgb(device_colors[device_idx])
+            pboxes = ann['pboxes']
+            # pboxes is parsed as {1: {...}, 2: {...}} by the Lua parser
+            pb_list = pboxes.values() if isinstance(pboxes, dict) else pboxes
+            rects = [
+                fitz.Rect(pb['x'], pb['y'], pb['x'] + pb['w'], pb['y'] + pb['h'])
+                for pb in pb_list
+            ]
+            highlight = page.add_highlight_annot(quads=rects)
+            highlight.set_colors(stroke=rgb)
+            highlight.set_opacity(0.5)
+            note = ann.get('note', '') or ''
+            if note:
+                highlight.set_info(content=note)
+            highlight.update()
+            rendered += 1
+            if verbose:
+                text_preview = (ann.get('text') or '')[:60]
+                print(f"  Page {pageno}: highlighted {text_preview!r}")
+
+    if skipped_oob and not verbose:
+        print(f"  Warning: {skipped_oob} annotation(s) skipped (page out of range)")
+
+    # Insert legend page at position 0
+    legend = doc.new_page(pno=0, width=612, height=792)
+    legend.insert_text((72, 72), "Annotation Sources", fontsize=18, fontname="helv")
+    for i, filepath in enumerate(file_list):
+        y_pos = 110 + i * 30
+        rgb = _hex_to_rgb(device_colors[i])
+        swatch = fitz.Rect(72, y_pos, 112, y_pos + 18)
+        legend.draw_rect(swatch, color=rgb, fill=rgb, fill_opacity=0.5)
+        legend.insert_text((120, y_pos + 14), os.path.basename(filepath), fontsize=12, fontname="helv")
+
+    doc.save(pdf_output_path, garbage=4, deflate=True)
+    doc.close()
+
+    if verbose:
+        print(f"  {rendered} annotation(s) rendered across {len(page_annotations)} page(s)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Merge KOReader annotations from multiple devices.',
@@ -838,6 +943,21 @@ def main():
         metavar='HTML',
         help='Output HTML file path (default: output path with .html extension)'
     )
+    parser.add_argument(
+        '--render-pdf',
+        action='store_true',
+        help='Render the PDF with colour-coded annotation highlights overlaid (requires PyMuPDF)'
+    )
+    parser.add_argument(
+        '--pdf',
+        metavar='PDF',
+        help='Path to the source PDF file (required when --render-pdf is used)'
+    )
+    parser.add_argument(
+        '--pdf-output',
+        metavar='PDF_OUT',
+        help='Output PDF file path (default: output path with .pdf extension)'
+    )
 
     args = parser.parse_args()
 
@@ -850,6 +970,16 @@ def main():
             parser.error('--epub is required when --render-html is used')
         if not os.path.isfile(args.epub):
             parser.error(f'epub file not found: {args.epub}')
+
+    # Infer --render-pdf when --pdf or --pdf-output is given
+    if args.pdf or args.pdf_output:
+        args.render_pdf = True
+
+    if args.render_pdf:
+        if not args.pdf:
+            parser.error('--pdf is required when --render-pdf is used')
+        if not os.path.isfile(args.pdf):
+            parser.error(f'PDF file not found: {args.pdf}')
 
     all_data = load_all_data(args.files, verbose=args.verbose)
     all_annotations = collect_annotations(all_data, args.files)
@@ -887,6 +1017,17 @@ def main():
             verbose=args.verbose,
         )
         print(f"HTML written to: {html_path}")
+
+    if args.render_pdf:
+        pdf_out_path: str = args.pdf_output or os.path.splitext(args.output)[0] + '.pdf'
+        render_annotated_pdf(
+            pdf_path=args.pdf,
+            pdf_output_path=pdf_out_path,
+            annotations=merged_annotations,
+            file_list=args.files,
+            verbose=args.verbose,
+        )
+        print(f"Annotated PDF written to: {pdf_out_path}")
 
 
 if __name__ == '__main__':
