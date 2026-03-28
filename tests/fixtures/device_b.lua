@@ -1,0 +1,61 @@
+return {
+    ["annotations"] = {
+        [1] = {
+            ["chapter"] = "Chapter 1",
+            ["datetime"] = "2024-01-10 10:00:00",
+            ["datetime_updated"] = "2024-01-10 11:00:00",
+            ["page"] = 5,
+            ["note"] = "Great passage!",
+            ["pos0"] = {
+                ["page"] = 5,
+                ["x"] = 10.0,
+                ["y"] = 100.0,
+            },
+            ["pos1"] = {
+                ["page"] = 5,
+                ["x"] = 200.0,
+                ["y"] = 100.0,
+            },
+            ["text"] = "Hello world",
+        },
+        [2] = {
+            ["chapter"] = "Chapter 3",
+            ["datetime"] = "2024-01-15 14:00:00",
+            ["datetime_updated"] = "2024-01-15 14:00:00",
+            ["page"] = 50,
+            ["pos0"] = {
+                ["page"] = 50,
+                ["x"] = 30.0,
+                ["y"] = 200.0,
+            },
+            ["pos1"] = {
+                ["page"] = 50,
+                ["x"] = 160.0,
+                ["y"] = 200.0,
+            },
+            ["text"] = "Device B only annotation",
+        },
+    },
+    ["current_page"] = 55,
+    ["doc_pages"] = 300,
+    ["doc_path"] = "/books/mybook.epub",
+    ["doc_props"] = {
+        ["authors"] = "Jane Doe",
+        ["language"] = "en",
+        ["series"] = "",
+        ["title"] = "My Book",
+    },
+    ["last_open"] = "2024-01-15 20:00:00",
+    ["partial_md5_checksum"] = "abc123",
+    ["percent_finished"] = 0.18,
+    ["stats"] = {
+        ["authors"] = "Jane Doe",
+        ["highlights"] = 2,
+        ["language"] = "en",
+        ["notes"] = 0,
+        ["pages"] = 300,
+        ["performance_in_pages"] = {},
+        ["series"] = "",
+        ["title"] = "My Book",
+    },
+}

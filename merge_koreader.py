@@ -58,6 +58,8 @@ def parse_lua_string(s: str, pos: int) -> Tuple[str, int]:
                     result.append(chr(int(hex_str, 16)))
                     pos += 2
                 else:
+                    # Invalid hex escape: emit literally (backslash + 'x')
+                    result.append('\\')
                     result.append(escape_char)
             elif escape_char.isdigit():
                 # Decimal escape \ddd (1-3 digits)
@@ -167,11 +169,11 @@ def parse_lua_value(s: str, pos: int) -> Tuple[Any, int]:
         return parse_lua_table(s, pos)
     
     # Boolean or nil
-    if s[pos:pos+4] == 'true' and (pos + 4 >= len(s) or not s[pos+4].isalnum()):
+    if s[pos:pos+4] == 'true' and (pos + 4 >= len(s) or not (s[pos+4].isalnum() or s[pos+4] == '_')):
         return True, pos + 4
-    if s[pos:pos+5] == 'false' and (pos + 5 >= len(s) or not s[pos+5].isalnum()):
+    if s[pos:pos+5] == 'false' and (pos + 5 >= len(s) or not (s[pos+5].isalnum() or s[pos+5] == '_')):
         return False, pos + 5
-    if s[pos:pos+3] == 'nil' and (pos + 3 >= len(s) or not s[pos+3].isalnum()):
+    if s[pos:pos+3] == 'nil' and (pos + 3 >= len(s) or not (s[pos+3].isalnum() or s[pos+3] == '_')):
         return None, pos + 3
     
     # Number (including negative and scientific notation)
@@ -489,6 +491,171 @@ def generate_lua_output(data: Dict) -> str:
     return '\n'.join(lines)
 
 
+def _progress_sort_key(d: Dict) -> Tuple:
+    """Sort key that ranks a file's reading progress furthest-first."""
+    pct = d.get('percent_finished', 0.0) or 0.0
+    try:
+        pct = float(pct)
+    except (TypeError, ValueError):
+        pct = 0.0
+    page = d.get('current_page', 0) or 0
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    last_open = str(d.get('last_open', '') or '')
+    return (pct, page, last_open)
+
+
+def load_all_data(filepaths: List[str], verbose: bool = False) -> List[Dict]:
+    """Parse all input Lua files and return a list of their data dicts.
+
+    Args:
+        filepaths: Paths to KOReader .lua metadata files.
+        verbose: If True, print annotation counts per file.
+
+    Returns:
+        List of parsed data dicts, one per file.
+    """
+    all_data = []
+    for filepath in filepaths:
+        print(f"Parsing: {filepath}")
+        try:
+            data = parse_lua_file(filepath)
+            all_data.append(data)
+            if verbose:
+                ann_count = len(data.get('annotations', {}))
+                print(f"  Found {ann_count} annotations")
+        except FileNotFoundError:
+            print(f"Error: File not found: {filepath}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error parsing {filepath}: {e}", file=sys.stderr)
+            sys.exit(1)
+    return all_data
+
+
+def collect_annotations(all_data: List[Dict], filepaths: List[str]) -> List[List[Dict]]:
+    """Extract and normalise the annotation lists from parsed data dicts.
+
+    Args:
+        all_data: Parsed data dicts (same order as filepaths).
+        filepaths: Original file paths, used only for warning messages.
+
+    Returns:
+        List of annotation lists, one per file that contained annotations.
+    """
+    all_annotations = []
+    for data, filepath in zip(all_data, filepaths):
+        if 'annotations' not in data:
+            continue
+        annotations = data['annotations']
+        if isinstance(annotations, dict):
+            skipped = [k for k in annotations.keys() if not isinstance(k, int)]
+            if skipped:
+                print(
+                    f"Warning: skipping {len(skipped)} non-integer annotation key(s) in "
+                    f"{filepath}: {skipped[:5]}",
+                    file=sys.stderr,
+                )
+            annotations = [annotations[k] for k in sorted(annotations.keys()) if isinstance(k, int)]
+        all_annotations.append(annotations)
+    return all_annotations
+
+
+def build_output(all_data: List[Dict], merged_annotations: List[Dict],
+                 highlights: int, bookmarks: int, notes: int) -> Dict:
+    """Assemble the output data dict from merged annotations and source metadata.
+
+    Args:
+        all_data: All parsed data dicts (first element is the metadata source).
+        merged_annotations: Deduplicated, sorted annotation list.
+        highlights: Count of highlight annotations.
+        bookmarks: Count of bookmark annotations.
+        notes: Count of annotations with a note field.
+
+    Returns:
+        Dict ready to be passed to generate_lua_output().
+    """
+    first_data = all_data[0]
+
+    # Warn if files appear to be from different editions of the book
+    checksums = [str(d['partial_md5_checksum']) for d in all_data if d.get('partial_md5_checksum')]
+    if len(set(checksums)) > 1:
+        print(
+            "Warning: partial_md5_checksum differs across input files — files may be from "
+            "different editions of the book. Proceeding with metadata from the first file.",
+            file=sys.stderr,
+        )
+    doc_paths = [str(d['doc_path']) for d in all_data if d.get('doc_path')]
+    if len(set(doc_paths)) > 1:
+        print(
+            f"Warning: doc_path differs across input files: {doc_paths}. "
+            "Using path from the first file.",
+            file=sys.stderr,
+        )
+
+    annotations_dict = {i: ann for i, ann in enumerate(merged_annotations, 1)}
+    output_data: Dict = {'annotations': annotations_dict}
+
+    # Reading progress: pick from the file with the furthest position.
+    # Using most-recent timestamp alone would regress position if a device
+    # was opened recently but hadn't caught up to where another device was.
+    progress_source = max(all_data, key=_progress_sort_key)
+    for field in ('current_page', 'percent_finished', 'last_open'):
+        if field in progress_source:
+            output_data[field] = progress_source[field]
+
+    # Document metadata from the first file
+    for field in ('doc_pages', 'doc_path', 'doc_props', 'partial_md5_checksum'):
+        if field in first_data:
+            output_data[field] = first_data[field]
+
+    # Rebuild stats with fresh annotation counts
+    doc_props = first_data.get('doc_props', {})
+    output_data['stats'] = {
+        'authors': doc_props.get('authors', ''),
+        'highlights': highlights,
+        'language': doc_props.get('language', ''),
+        'notes': notes,
+        'pages': first_data.get('doc_pages', 0),
+        # KOReader stores per-session reading-speed analytics here; we don't merge it,
+        # so emit an empty table to keep the schema valid.
+        'performance_in_pages': {},
+        'series': doc_props.get('series', ''),
+        'title': doc_props.get('title', ''),
+    }
+
+    # Summary: take the most recently modified one
+    summaries = [d['summary'] for d in all_data if d.get('summary')]
+    if summaries:
+        summaries.sort(key=lambda x: x.get('modified', '') if isinstance(x, dict) else '', reverse=True)
+        output_data['summary'] = summaries[0]
+
+    return output_data
+
+
+def write_output(content: str, filepath: str, dry_run: bool) -> None:
+    """Write Lua content to a file, or report what would be written on dry-run.
+
+    Args:
+        content: Lua file content to write.
+        filepath: Destination file path.
+        dry_run: If True, print a summary instead of writing.
+    """
+    if dry_run:
+        print("\nDry run — no file written.")
+        print(f"  Would write {len(content)} bytes to: {filepath}")
+    else:
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"\nOutput written to: {filepath}")
+        except Exception as e:
+            print(f"Error writing output: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Merge KOReader annotations from multiple devices.',
@@ -518,137 +685,26 @@ def main():
     )
 
     args = parser.parse_args()
-    
-    if len(args.files) < 1:
-        print("Error: At least one input file required.", file=sys.stderr)
-        sys.exit(1)
-    
-    # Parse all input files
-    all_data = []
-    for filepath in args.files:
-        print(f"Parsing: {filepath}")
-        try:
-            data = parse_lua_file(filepath)
-            all_data.append(data)
-            
-            if args.verbose:
-                ann_count = len(data.get('annotations', {}))
-                print(f"  Found {ann_count} annotations")
-                
-        except FileNotFoundError:
-            print(f"Error: File not found: {filepath}", file=sys.stderr)
-            sys.exit(1)
-        except Exception as e:
-            print(f"Error parsing {filepath}: {e}", file=sys.stderr)
-            sys.exit(1)
-    
-    # Collect annotations from all files
-    all_annotations = []
-    for data in all_data:
-        if 'annotations' in data:
-            annotations = data['annotations']
-            if isinstance(annotations, dict):
-                # Convert dict with integer keys to list; warn about skipped non-integer keys
-                skipped = [k for k in annotations.keys() if not isinstance(k, int)]
-                if skipped:
-                    print(
-                        f"Warning: skipping {len(skipped)} non-integer annotation key(s) in "
-                        f"{args.files[all_data.index(data)]}: {skipped[:5]}",
-                        file=sys.stderr,
-                    )
-                annotations = [annotations[k] for k in sorted(annotations.keys()) if isinstance(k, int)]
-            all_annotations.append(annotations)
-    
-    # Merge annotations
+
+    all_data = load_all_data(args.files, verbose=args.verbose)
+    all_annotations = collect_annotations(all_data, args.files)
     merged_annotations, duplicates_removed = merge_annotations(all_annotations)
 
-    # Count highlights vs bookmarks
     highlights = sum(1 for ann in merged_annotations if 'pos0' in ann)
     bookmarks = len(merged_annotations) - highlights
     notes = sum(1 for ann in merged_annotations if ann.get('note'))
 
-    print(f"\nMerged results:")
+    print("\nMerged results:")
     print(f"  Total annotations: {len(merged_annotations)}")
     print(f"  Highlights: {highlights}")
     print(f"  Bookmarks: {bookmarks}")
     print(f"  Notes: {notes}")
     if args.verbose and duplicates_removed > 0:
         print(f"  Duplicates removed: {duplicates_removed}")
-    
-    # Convert to dict with integer keys (Lua array format)
-    annotations_dict = {i: ann for i, ann in enumerate(merged_annotations, 1)}
-    
-    # Use first file as source for metadata
-    first_data = all_data[0]
 
-    # Pick reading progress from the file with the most recent last_open timestamp
-    progress_source = None
-    best_last_open = ''
-    for d in all_data:
-        last_open = d.get('last_open', '')
-        if last_open and str(last_open) > best_last_open:
-            best_last_open = str(last_open)
-            progress_source = d
-    if progress_source is None:
-        progress_source = first_data
-
-    # Build output with only essential data (no display settings)
-    output_data = {
-        'annotations': annotations_dict,
-    }
-
-    # Include reading progress
-    for field in ('current_page', 'percent_finished', 'last_open'):
-        if field in progress_source:
-            output_data[field] = progress_source[field]
-    
-    # Include document metadata
-    if 'doc_pages' in first_data:
-        output_data['doc_pages'] = first_data['doc_pages']
-    
-    if 'doc_path' in first_data:
-        output_data['doc_path'] = first_data['doc_path']
-    
-    if 'doc_props' in first_data:
-        output_data['doc_props'] = first_data['doc_props']
-    
-    if 'partial_md5_checksum' in first_data:
-        output_data['partial_md5_checksum'] = first_data['partial_md5_checksum']
-    
-    # Build updated stats
-    doc_props = first_data.get('doc_props', {})
-    output_data['stats'] = {
-        'authors': doc_props.get('authors', ''),
-        'highlights': highlights,
-        'language': doc_props.get('language', ''),
-        'notes': notes,
-        'pages': first_data.get('doc_pages', 0),
-        'performance_in_pages': {},
-        'series': 'N/A',
-        'title': doc_props.get('title', ''),
-    }
-    
-    # Include summary if present (take most recent)
-    summaries = [d.get('summary') for d in all_data if d.get('summary')]
-    if summaries:
-        # Sort by modified date and take the most recent
-        summaries.sort(key=lambda x: x.get('modified', ''), reverse=True)
-        output_data['summary'] = summaries[0]
-    
-    # Generate output
+    output_data = build_output(all_data, merged_annotations, highlights, bookmarks, notes)
     output_content = generate_lua_output(output_data)
-
-    if args.dry_run:
-        print(f"\nDry run — no file written.")
-        print(f"  Would write {len(output_content)} bytes to: {args.output}")
-    else:
-        try:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(output_content)
-            print(f"\nOutput written to: {args.output}")
-        except Exception as e:
-            print(f"Error writing output: {e}", file=sys.stderr)
-            sys.exit(1)
+    write_output(output_content, args.output, dry_run=args.dry_run)
 
 
 if __name__ == '__main__':
