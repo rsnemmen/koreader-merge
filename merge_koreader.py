@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 Merge KOReader annotations from multiple devices.
 
@@ -700,21 +700,22 @@ def _highlight_text_in_html(html_content: str, ann_text: str, color: str, note: 
     return html_content
 
 
-def render_annotated_pdf(
+def render_annotated_html(
     epub_path: str,
-    pdf_output_path: str,
+    html_output_path: str,
     annotations: List[Dict],
     file_list: List[str],
     verbose: bool = False,
 ) -> None:
-    """Render epub content with colour-coded annotation highlights to a PDF file.
+    """Render epub content with colour-coded annotation highlights to an HTML file.
 
     Annotations are colour-coded by source device (input file).  A legend at the
-    top of the PDF maps each colour to its source filename.
+    top of the page maps each colour to its source filename.  The resulting HTML
+    can be opened in any browser and printed to PDF if needed.
 
     Args:
         epub_path: Path to the epub file to render.
-        pdf_output_path: Destination PDF file path.
+        html_output_path: Destination HTML file path.
         annotations: Merged annotations; each must carry a ``_device_index`` key
             set before merging (int index into file_list).
         file_list: Ordered list of input .lua file paths (used for legend labels).
@@ -723,11 +724,10 @@ def render_annotated_pdf(
     try:
         import ebooklib
         from ebooklib import epub
-        from weasyprint import HTML as WeasyprintHTML
     except ImportError:
         print(
-            "Error: --render-pdf requires 'ebooklib' and 'weasyprint'.\n"
-            "Install with: pip install ebooklib weasyprint",
+            "Error: --render-html requires 'ebooklib'.\n"
+            "Install with: pip install ebooklib",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -780,7 +780,7 @@ def render_annotated_pdf(
     if verbose:
         print(f"  {matched_total}/{len(ann_data)} annotations matched in epub text")
 
-    combined_body = '\n<div style="page-break-after: always;"></div>\n'.join(chapter_htmls)
+    combined_body = '\n<hr style="margin: 30px 0;">\n'.join(chapter_htmls)
     full_html = (
         '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n'
         '<style>\n'
@@ -792,8 +792,8 @@ def render_annotated_pdf(
         + '\n</body>\n</html>'
     )
 
-    print("Rendering PDF (this may take a moment)...")
-    WeasyprintHTML(string=full_html).write_pdf(pdf_output_path)
+    with open(html_output_path, 'w', encoding='utf-8') as f:
+        f.write(full_html)
 
 
 def main():
@@ -824,26 +824,30 @@ def main():
         help='Show what would be written without actually writing the output file'
     )
     parser.add_argument(
-        '--render-pdf',
+        '--render-html',
         action='store_true',
-        help='Render the epub with colour-coded annotation highlights to a PDF file'
+        help='Render the epub with colour-coded annotation highlights to an HTML file'
     )
     parser.add_argument(
         '--epub',
         metavar='EPUB',
-        help='Path to the epub file (required when --render-pdf is used)'
+        help='Path to the epub file (required when --render-html is used)'
     )
     parser.add_argument(
-        '--pdf-output',
-        metavar='PDF',
-        help='Output PDF file path (default: output path with .pdf extension)'
+        '--html-output',
+        metavar='HTML',
+        help='Output HTML file path (default: output path with .html extension)'
     )
 
     args = parser.parse_args()
 
-    if args.render_pdf:
+    # Infer --render-html when --epub or --html-output is given
+    if args.epub or args.html_output:
+        args.render_html = True
+
+    if args.render_html:
         if not args.epub:
-            parser.error('--epub is required when --render-pdf is used')
+            parser.error('--epub is required when --render-html is used')
         if not os.path.isfile(args.epub):
             parser.error(f'epub file not found: {args.epub}')
 
@@ -873,16 +877,16 @@ def main():
     output_content = generate_lua_output(output_data)
     write_output(output_content, args.output, dry_run=args.dry_run)
 
-    if args.render_pdf:
-        pdf_path: str = args.pdf_output or os.path.splitext(args.output)[0] + '.pdf'
-        render_annotated_pdf(
+    if args.render_html:
+        html_path: str = args.html_output or os.path.splitext(args.output)[0] + '.html'
+        render_annotated_html(
             epub_path=args.epub,
-            pdf_output_path=pdf_path,
+            html_output_path=html_path,
             annotations=merged_annotations,
             file_list=args.files,
             verbose=args.verbose,
         )
-        print(f"PDF written to: {pdf_path}")
+        print(f"HTML written to: {html_path}")
 
 
 if __name__ == '__main__':

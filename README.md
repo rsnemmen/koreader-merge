@@ -31,6 +31,26 @@ merge_koreader.py \
   -o ~/synced/book.sdr/metadata.epub.lua
 ```
 
+### Visualising annotations as a PDF
+
+Pass `--render-pdf` together with `--epub` to produce a PDF rendering of the epub with all annotations highlighted, colour-coded by source device:
+
+```bash
+merge_koreader.py \
+  ~/palma2/book.sdr/metadata.epub.lua \
+  ~/go7/book.sdr/metadata.epub.lua \
+  -o merged.lua \
+  --render-pdf --epub ~/books/mybook.epub
+```
+
+A colour legend at the top of the PDF maps each highlight colour to its source file. Annotations that carry a note show an inline `[note]` label. Use `--pdf-output path/to/output.pdf` to set a custom PDF path (default: same name as the output `.lua` with a `.pdf` extension).
+
+This feature requires two optional dependencies:
+
+```bash
+pip install ebooklib weasyprint
+```
+
 ## Behavior
 
 - **Merged**: Highlights, bookmarks, notes, and reading progress
@@ -44,7 +64,8 @@ Since display settings are not merged, KOReader will fall back to your configure
 ## Requirements
 
 - Python 3.6+
-- No external dependencies
+- No external dependencies for the core merge workflow
+- `ebooklib` and `weasyprint` are required only for `--render-pdf`
 
 ## Tests
 
