@@ -31,24 +31,24 @@ merge_koreader.py \
   -o ~/synced/book.sdr/metadata.epub.lua
 ```
 
-### Visualising annotations as a PDF
+### Visualising annotations as HTML
 
-Pass `--render-pdf` together with `--epub` to produce a PDF rendering of the epub with all annotations highlighted, colour-coded by source device:
+Pass `--render-html` together with `--epub` to produce an HTML rendering of the epub with all annotations highlighted, colour-coded by source device:
 
 ```bash
 merge_koreader.py \
   ~/palma2/book.sdr/metadata.epub.lua \
   ~/go7/book.sdr/metadata.epub.lua \
   -o merged.lua \
-  --render-pdf --epub ~/books/mybook.epub
+  --render-html --epub ~/books/mybook.epub
 ```
 
-A colour legend at the top of the PDF maps each highlight colour to its source file. Annotations that carry a note show an inline `[note]` label. Use `--pdf-output path/to/output.pdf` to set a custom PDF path (default: same name as the output `.lua` with a `.pdf` extension).
+A colour legend at the top of the page maps each highlight colour to its source file. Annotations that carry a note show an inline `[note]` label (hover for the note text). Use `--html-output path/to/output.html` to set a custom output path (default: same name as the output `.lua` with a `.html` extension).
 
-This feature requires two optional dependencies:
+This feature requires one optional dependency:
 
 ```bash
-pip install ebooklib weasyprint
+pip install ebooklib
 ```
 
 ## Behavior
@@ -65,7 +65,7 @@ Since display settings are not merged, KOReader will fall back to your configure
 
 - Python 3.6+
 - No external dependencies for the core merge workflow
-- `ebooklib` and `weasyprint` are required only for `--render-pdf`
+- `ebooklib` is required only for `--render-html`
 
 ## Tests
 
