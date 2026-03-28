@@ -51,6 +51,26 @@ This feature requires one optional dependency:
 pip install ebooklib
 ```
 
+### Visualising annotations on PDF
+
+Pass `--render-pdf` together with `--pdf` to overlay colour-coded highlights directly onto the PDF pages:
+
+```bash
+merge_koreader.py \
+  ~/palma2/book.sdr/metadata.pdf.lua \
+  ~/go7/book.sdr/metadata.pdf.lua \
+  -o merged.lua \
+  --render-pdf --pdf ~/books/mybook.pdf
+```
+
+Each source device gets a distinct highlight colour. Notes are attached as popup annotations (visible on hover in most PDF readers). A legend page is inserted at the start of the document mapping each colour to its source file. Use `--pdf-output path/to/output.pdf` to set a custom output path (default: same name as the output `.lua` with a `.pdf` extension).
+
+This feature requires one optional dependency:
+
+```bash
+pip install PyMuPDF
+```
+
 ## Behavior
 
 - **Merged**: Highlights, bookmarks, notes, and reading progress
@@ -66,6 +86,7 @@ Since display settings are not merged, KOReader will fall back to your configure
 - Python 3.6+
 - No external dependencies for the core merge workflow
 - `ebooklib` is required only for `--render-html`
+- `PyMuPDF` is required only for `--render-pdf`
 
 ## Tests
 
