@@ -1,26 +1,32 @@
 # Agent Instructions for koreader_merge_highlights
 
 ## Project Overview
-Single-file Python utility (654 lines) that merges KOReader annotation files from multiple devices. No external dependencies, standard library only.
+Single-file Python utility (~1030 lines) that merges KOReader annotation files from multiple devices. Standard library only for the core merge workflow; `ebooklib` and `PyMuPDF` are optional dependencies for rendering. Uses `python3.13` (conda).
 
 ## Commands
 
 ### Running the Script
 ```bash
 # Merge multiple Lua files
-python merge_koreader.py file1.lua file2.lua -o output.lua
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua
 
 # With verbose output
-python merge_koreader.py file1.lua file2.lua -o output.lua -v
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua -v
 
 # Dry run (preview without writing)
-python merge_koreader.py file1.lua file2.lua -o output.lua -n
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua -n
+
+# Render epub with colour-coded highlights to HTML (requires ebooklib)
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --epub mybook.epub --html-output out.html
+
+# Overlay colour-coded highlights on a PDF (requires PyMuPDF)
+python3.13 merge_koreader.py file1.lua file2.lua -o output.lua --pdf mybook.pdf --pdf-output out.pdf
 ```
 
 ### Code Quality
 ```bash
-# Manual syntax check
-python -m py_compile merge_koreader.py
+# Syntax check
+python3.13 -m py_compile merge_koreader.py
 
 # Type check (if mypy available)
 mypy merge_koreader.py --ignore-missing-imports
@@ -30,6 +36,9 @@ ruff check merge_koreader.py
 
 # Format (if ruff available)
 ruff format merge_koreader.py
+
+# Run tests
+python3.13 -m pytest tests/
 ```
 
 ## Code Style Guidelines
@@ -48,13 +57,15 @@ import re
 import sys
 from typing import Any, Dict, List, Tuple
 
-# No external dependencies allowed
+# Optional dependencies imported lazily inside functions (never at top level)
+# ebooklib — only in render_annotated_html()
+# fitz (PyMuPDF) — only in render_annotated_pdf()
 ```
 
 ### Naming Conventions
 - Functions: `snake_case` (e.g., `parse_lua_table`, `merge_annotations`)
 - Variables: `snake_case` (e.g., `annotations_list`, `merged_annotations`)
-- Constants: `UPPER_SNAKE_CASE` (if any)
+- Constants: `UPPER_SNAKE_CASE` (e.g., `DEVICE_COLORS`)
 - Type variables: follow PEP 8
 
 ### Formatting
@@ -88,32 +99,40 @@ from typing import Any, Dict, List, Tuple
 - Sort dictionary keys for deterministic output (integers first, then strings)
 
 ### Testing Approach
-This project has no formal test suite. When making changes:
-1. Test with actual KOReader Lua files
-2. Verify output is valid Lua syntax
-3. Test with both EPUB and PDF annotation files
-4. Ensure merged files load correctly in KOReader
+Tests live in `tests/test_merge.py`. Run with `python3.13 -m pytest tests/`. Fixtures are in `tests/fixtures/`:
+- `device_a.lua`, `device_b.lua` — synthetic fixtures
+- `arabia_deserta_palma2.pdf.lua`, `arabia_deserta_go7.pdf.lua` — real PDF annotation fixtures
+- `arabia_deserta.pdf` — source PDF for render tests
+- `palo_alto_palma2.epub.lua`, `palo_alto_go7.epub.lua` — real epub annotation fixtures
+- `palo_alto.epub` — source epub for render tests
 
 ## Architecture
 
 ### Key Functions
-- `parse_lua_file()` - Entry point for parsing KOReader metadata files
-- `parse_lua_table()` - Recursive Lua table parser
-- `parse_lua_value()` - Dispatch to appropriate value parser
-- `merge_annotations()` - Deduplicate and merge annotation lists
-- `format_lua_value()` - Serialize Python data back to Lua
-- `generate_lua_output()` - Build final Lua file content
+- `parse_lua_file()` — Entry point for parsing KOReader metadata files
+- `parse_lua_table()` — Recursive Lua table parser
+- `parse_lua_value()` — Dispatch to appropriate value parser
+- `merge_annotations()` — Deduplicate and merge annotation lists
+- `annotation_key()` — Generates deduplication key (pos0/pos1 for highlights, page/chapter for bookmarks)
+- `format_lua_value()` — Serialize Python data back to Lua
+- `generate_lua_output()` — Build final Lua file content
+- `render_annotated_html()` — Render epub with colour-coded highlights to HTML (requires ebooklib)
+- `render_annotated_pdf()` — Overlay colour-coded highlights on a PDF (requires PyMuPDF)
+- `_hex_to_rgb()` — Convert `#RRGGBB` to float RGB tuple for PyMuPDF
 
 ### Data Flow
 1. Read Lua file → parse into Python dict
 2. Extract annotations from all input files
-3. Merge and deduplicate annotations
-4. Build output data structure (no display settings)
-5. Serialize to Lua format and write
+3. Tag each annotation with `_device_index` for colour-coding
+4. Merge and deduplicate annotations
+5. Build output data structure (no display settings)
+6. Serialize to Lua format and write
+7. Optionally render HTML (epub) or annotated PDF
 
 ## Important Notes
-- **No display settings merged** - only annotations, bookmarks, notes, and reading progress
+- **No display settings merged** — only annotations, bookmarks, notes, and reading progress
 - **Deduplication** uses annotation position/page as key
 - **Sort order** is deterministic (stable across runs)
-- **Backwards compatibility** with Python 3.6 required
-- Keep script standalone - no external dependencies
+- **`_device_index`** keys are stripped from Lua output (keys starting with `_` are filtered)
+- **pboxes** in PDF annotations are parsed as `{1: {...}, 2: {...}}` dicts by the Lua parser, not lists
+- **Coordinate system**: KOReader pboxes use top-left origin matching PyMuPDF — no transform needed
