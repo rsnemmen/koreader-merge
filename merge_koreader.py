@@ -6,9 +6,14 @@ Usage: python merge_koreader.py file1.lua file2.lua [file3.lua ...] -o output.lu
 """
 
 import argparse
+import html as html_module
+import os
 import re
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+# Highlight colors for annotations, one per source device (cycles if more than 5)
+DEVICE_COLORS = ["#FFFF99", "#99FFFF", "#FF99CC", "#99FF99", "#FFD699"]
 
 
 def parse_lua_string(s: str, pos: int) -> Tuple[str, int]:
@@ -595,7 +600,10 @@ def build_output(all_data: List[Dict], merged_annotations: List[Dict],
             file=sys.stderr,
         )
 
-    annotations_dict = {i: ann for i, ann in enumerate(merged_annotations, 1)}
+    annotations_dict = {
+        i: {k: v for k, v in ann.items() if not k.startswith('_')}
+        for i, ann in enumerate(merged_annotations, 1)
+    }
     output_data: Dict = {'annotations': annotations_dict}
 
     # Reading progress: pick from the file with the furthest position.
@@ -656,6 +664,138 @@ def write_output(content: str, filepath: str, dry_run: bool) -> None:
             sys.exit(1)
 
 
+def _highlight_text_in_html(html_content: str, ann_text: str, color: str, note: str = '') -> str:
+    """Find ann_text in html_content and wrap it with a colored highlight span.
+
+    Tries exact HTML-escaped match first, then raw text match, then whitespace-normalised match.
+    Returns html_content unchanged if no match is found.
+    """
+    if not ann_text:
+        return html_content
+
+    note_html = ''
+    if note:
+        note_escaped = html_module.escape(note, quote=True)
+        note_html = f' <span class="ann-note" title="{note_escaped}">[note]</span>'
+
+    def make_span(inner: str) -> str:
+        return (
+            f'<span style="background-color: {color}; padding: 0 2px;">'
+            f'{inner}</span>{note_html}'
+        )
+
+    escaped_text = html_module.escape(ann_text)
+    if escaped_text in html_content:
+        return html_content.replace(escaped_text, make_span(escaped_text), 1)
+
+    if ann_text in html_content:
+        return html_content.replace(ann_text, make_span(html_module.escape(ann_text)), 1)
+
+    # Whitespace-normalised fallback
+    normalised = re.sub(r'\s+', ' ', ann_text).strip()
+    normalised_escaped = html_module.escape(normalised)
+    if normalised_escaped in html_content:
+        return html_content.replace(normalised_escaped, make_span(normalised_escaped), 1)
+
+    return html_content
+
+
+def render_annotated_pdf(
+    epub_path: str,
+    pdf_output_path: str,
+    annotations: List[Dict],
+    file_list: List[str],
+    verbose: bool = False,
+) -> None:
+    """Render epub content with colour-coded annotation highlights to a PDF file.
+
+    Annotations are colour-coded by source device (input file).  A legend at the
+    top of the PDF maps each colour to its source filename.
+
+    Args:
+        epub_path: Path to the epub file to render.
+        pdf_output_path: Destination PDF file path.
+        annotations: Merged annotations; each must carry a ``_device_index`` key
+            set before merging (int index into file_list).
+        file_list: Ordered list of input .lua file paths (used for legend labels).
+        verbose: If True, print per-annotation match status.
+    """
+    try:
+        import ebooklib
+        from ebooklib import epub
+        from weasyprint import HTML as WeasyprintHTML
+    except ImportError:
+        print(
+            "Error: --render-pdf requires 'ebooklib' and 'weasyprint'.\n"
+            "Install with: pip install ebooklib weasyprint",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    device_colors = {i: DEVICE_COLORS[i % len(DEVICE_COLORS)] for i in range(len(file_list))}
+
+    # Collect (text, color, note) tuples — skip annotations without text
+    ann_data: List[Tuple[str, str, str]] = []
+    for ann in annotations:
+        text = ann.get('text', '')
+        if not text:
+            continue
+        device_idx = ann.get('_device_index', 0)
+        color = device_colors.get(device_idx, DEVICE_COLORS[0])
+        note = ann.get('note', '') or ''
+        ann_data.append((text, color, note))
+
+    # Build legend HTML
+    legend_rows = []
+    for i, filepath in enumerate(file_list):
+        color = device_colors[i]
+        name = os.path.basename(filepath)
+        legend_rows.append(
+            f'  <p style="margin: 4px 0;">'
+            f'<span style="background-color: {color}; padding: 2px 10px; margin-right: 8px;">'
+            f'&nbsp;&nbsp;&nbsp;&nbsp;</span>{html_module.escape(name)}</p>'
+        )
+    legend_html = (
+        '<div style="font-family: sans-serif; margin: 20px; padding: 12px;'
+        ' border: 1px solid #ccc; background: #f9f9f9;">'
+        '<h3 style="margin-top: 0;">Annotation Sources</h3>\n'
+        + '\n'.join(legend_rows)
+        + '\n</div>\n<hr style="margin: 20px 0;">\n'
+    )
+
+    # Process epub chapters and apply highlights
+    book = epub.read_epub(epub_path)
+    chapter_htmls: List[str] = []
+    matched_total = 0
+    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+        content = item.get_content().decode('utf-8', errors='replace')
+        for ann_text, color, note in ann_data:
+            new_content = _highlight_text_in_html(content, ann_text, color, note)
+            if new_content is not content and verbose:
+                print(f"  Highlighted: {ann_text[:60]!r}")
+                matched_total += 1
+            content = new_content
+        chapter_htmls.append(content)
+
+    if verbose:
+        print(f"  {matched_total}/{len(ann_data)} annotations matched in epub text")
+
+    combined_body = '\n<div style="page-break-after: always;"></div>\n'.join(chapter_htmls)
+    full_html = (
+        '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n'
+        '<style>\n'
+        'body { font-family: Georgia, serif; font-size: 12pt; line-height: 1.6; margin: 40px; }\n'
+        '.ann-note { font-size: 9pt; color: #555; font-style: italic; }\n'
+        '</style>\n</head>\n<body>\n'
+        + legend_html
+        + combined_body
+        + '\n</body>\n</html>'
+    )
+
+    print("Rendering PDF (this may take a moment)...")
+    WeasyprintHTML(string=full_html).write_pdf(pdf_output_path)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Merge KOReader annotations from multiple devices.',
@@ -683,11 +823,38 @@ def main():
         action='store_true',
         help='Show what would be written without actually writing the output file'
     )
+    parser.add_argument(
+        '--render-pdf',
+        action='store_true',
+        help='Render the epub with colour-coded annotation highlights to a PDF file'
+    )
+    parser.add_argument(
+        '--epub',
+        metavar='EPUB',
+        help='Path to the epub file (required when --render-pdf is used)'
+    )
+    parser.add_argument(
+        '--pdf-output',
+        metavar='PDF',
+        help='Output PDF file path (default: output path with .pdf extension)'
+    )
 
     args = parser.parse_args()
 
+    if args.render_pdf:
+        if not args.epub:
+            parser.error('--epub is required when --render-pdf is used')
+        if not os.path.isfile(args.epub):
+            parser.error(f'epub file not found: {args.epub}')
+
     all_data = load_all_data(args.files, verbose=args.verbose)
     all_annotations = collect_annotations(all_data, args.files)
+
+    # Tag each annotation with its source device index so the PDF renderer can colour-code it
+    for device_idx, ann_list in enumerate(all_annotations):
+        for ann in ann_list:
+            ann['_device_index'] = device_idx
+
     merged_annotations, duplicates_removed = merge_annotations(all_annotations)
 
     highlights = sum(1 for ann in merged_annotations if 'pos0' in ann)
@@ -705,6 +872,17 @@ def main():
     output_data = build_output(all_data, merged_annotations, highlights, bookmarks, notes)
     output_content = generate_lua_output(output_data)
     write_output(output_content, args.output, dry_run=args.dry_run)
+
+    if args.render_pdf:
+        pdf_path: str = args.pdf_output or os.path.splitext(args.output)[0] + '.pdf'
+        render_annotated_pdf(
+            epub_path=args.epub,
+            pdf_output_path=pdf_path,
+            annotations=merged_annotations,
+            file_list=args.files,
+            verbose=args.verbose,
+        )
+        print(f"PDF written to: {pdf_path}")
 
 
 if __name__ == '__main__':
