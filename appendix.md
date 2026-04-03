@@ -36,5 +36,3 @@ So the behavior is:
 This means the script I provided is safe to use — when you open a book with the merged annotations file that lacks display settings, KOReader will simply apply your global default settings (font size, margins, line spacing, etc.) as if you were opening the book for the first time.
 
 **The practical effect**: Your annotations and highlights will be preserved, but the book will open with your device's default display preferences rather than the per-book customizations you may have made. If you had customized the font size or margins specifically for that book on one device, you'd need to re-adjust them.
-
-Would you like me to modify the script to optionally preserve display settings from one of the source files (e.g., the most recently modified one)?
