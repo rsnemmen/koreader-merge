@@ -1,4 +1,4 @@
-#!/usr/bin/env python3.13
+#!/usr/bin/env python
 """
 Merge KOReader annotations from multiple devices.
 

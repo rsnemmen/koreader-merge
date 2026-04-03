@@ -8,6 +8,14 @@ A utility script to merge KOReader notes/highlights files (sidecar `.lua` files 
 
 ---
 
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/install.sh | bash
+```
+
+Installs `merge_koreader` to `/usr/local/bin` (or `~/.local/bin`). Requires Python 3.6+.
+
 ## Purpose
 
 When reading the same book on multiple devices with KOReader, each device creates its own `metadata.*.lua` sidecar file containing highlights, bookmarks, and notes. This script merges those files into a single unified annotation file.
