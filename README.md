@@ -8,6 +8,29 @@ A utility script to merge KOReader notes/highlights files (sidecar `.lua` files 
 
 ---
 
+## Try without installing
+
+Run the latest version straight from GitHub without copying anything to your PATH — the `npx -y` equivalent for this single-file script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/merge_koreader.py \
+  | python3 - file1.lua file2.lua -o output.lua
+```
+
+`python3 -` reads the program from stdin and passes the remaining arguments to it. Requires Python 3.6+; nothing is written to disk other than your `-o` output file.
+
+If you have [`uv`](https://github.com/astral-sh/uv), it can run the script directly from the URL:
+
+```bash
+uv run https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/merge_koreader.py \
+  -- file1.lua file2.lua -o output.lua
+```
+
+> **Note:** The optional `--render-html` / `--render-pdf` modes need `ebooklib` / `PyMuPDF`.
+> These aren't pulled in by the one-liners above — for those features, use the permanent install below, or prefix with `uv run --with ebooklib` / `uv run --with PyMuPDF`.
+
+---
+
 ## Installation
 
 ```bash
