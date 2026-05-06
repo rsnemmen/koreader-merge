@@ -4,20 +4,18 @@ A utility script to merge KOReader notes/highlights files (sidecar `.lua` files 
 
 ---
 **WARNING**  
-⚠️Use this at your discretion and always make backups of your books and KOReader files/notes etc. This has been tested with EPUB and PDF books, and gave satisfactory results (see Tests below).
+⚠️Use this at your discretion and always make backups of your books and KOReader files/notes etc. This has been tested with EPUB and PDF books, and gave satisfactory results.
 
 ---
 
-## Try without installing
+## Try it 
 
-Run the latest version straight from GitHub without copying anything to your PATH — the `npx -y` equivalent for this single-file script:
+### Without installing
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/merge_koreader.py \
   | python3 - file1.lua file2.lua -o output.lua
 ```
-
-`python3 -` reads the program from stdin and passes the remaining arguments to it. Requires Python 3.6+; nothing is written to disk other than your `-o` output file.
 
 If you have [`uv`](https://github.com/astral-sh/uv), it can run the script directly from the URL:
 
@@ -27,11 +25,9 @@ uv run https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/merge_kore
 ```
 
 > **Note:** The optional `--render-html` / `--render-pdf` modes need `ebooklib` / `PyMuPDF`.
-> These aren't pulled in by the one-liners above — for those features, use the permanent install below, or prefix with `uv run --with ebooklib` / `uv run --with PyMuPDF`.
+> These aren't pulled in by the one-liners above — for those features, use the permanent install below.
 
----
-
-## Installation
+### Installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rsnemmen/koreader-merge/main/install.sh | bash
@@ -118,27 +114,3 @@ Since display settings are not merged, KOReader will fall back to your configure
 - No external dependencies for the core merge workflow
 - `ebooklib` is required only for `--render-html`
 - `PyMuPDF` is required only for `--render-pdf`
-
-## Tests
-
-- [x] ePub book with notes from Palma 2 and Go 7 color. BlueStacks emulator. Preserves highlights colors and notes. 
-- [x] PDF book with notes from Palma 2 and Go 7 color. BlueStacks emulator.  Preserves highlights colors and notes. 
-
-
-## TODO  
-
-Additional testing welcome—particularly across different e-reader devices and book formats.
-
-- [ ] test on actual devices
-- [x] test
-	- [x] diff original files with output
-	- [x] test output in one of the devices
-	- [x] test in android simulator
-- [x] test PDF book
-- [x] release on github
-
-
-## Disclaimers
-
-This project would benefit from additional community testing, particularly on physical e-reader devices. Please keep backups of your book annotations. 
-
