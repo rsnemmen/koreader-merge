@@ -10,7 +10,7 @@ import html as html_module
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 # Highlight colors for annotations, one per source device (cycles if more than 5)
 DEVICE_COLORS = ["#FFFF99", "#99FFFF", "#FF99CC", "#99FF99", "#FFD699"]
@@ -304,7 +304,7 @@ def annotation_sort_key(ann: Dict) -> Tuple[int, int, int, float, float, str]:
     Total ordering for annotations that is stable across different schemas.
 
     Always returns:
-      (kind_rank, pageno, pos_page, y, x, datetime)
+      (pageno, kind_rank, pos_page, y, x, datetime)
 
     No mixed int/str comparisons.
     """
@@ -325,13 +325,13 @@ def annotation_sort_key(ann: Dict) -> Tuple[int, int, int, float, float, str]:
         and not has_pos
     )
 
-    # Put real highlights first, then bookmarks/others, then chapter markers (or vice versa if you prefer)
+    # Match KOReader's broad ordering: location first, then bookmarks before highlights.
     if has_pos:
-        kind_rank = 0
-    elif is_chapter_marker:
-        kind_rank = 2
-    else:
         kind_rank = 1
+    elif is_chapter_marker:
+        kind_rank = 0
+    else:
+        kind_rank = 0
 
     pos0 = ann.get("pos0")
 
@@ -364,13 +364,22 @@ def annotation_sort_key(ann: Dict) -> Tuple[int, int, int, float, float, str]:
     else:
         dt = str(dt)
 
-    return (kind_rank, pageno, pos_page, y, x, dt)
+    return (pageno, kind_rank, pos_page, y, x, dt)
 
 
 def annotation_key(ann: Dict) -> Tuple:
     """Generate a unique key for an annotation to detect duplicates."""
     # For highlights with position data
     if 'pos0' in ann and 'pos1' in ann:
+        pos0 = ann.get('pos0')
+        pos1 = ann.get('pos1')
+        if isinstance(pos0, dict) and isinstance(pos1, dict):
+            # Zoom and rotation describe a device view, not the selected text.
+            return (
+                'highlight',
+                (pos0.get('page', ann.get('page')), pos0.get('x'), pos0.get('y')),
+                (pos1.get('page', ann.get('page')), pos1.get('x'), pos1.get('y')),
+            )
         return ('highlight', freeze_for_key(ann.get('pos0')), freeze_for_key(ann.get('pos1')))
     # For bookmarks without position data, use page location
     page = ann.get('page') or ann.get('pageno')
@@ -427,7 +436,9 @@ def lua_escape_string(s: str) -> str:
         elif char == '\t':
             result.append('\\t')
         elif ord(char) < 32:
-            result.append(f'\\{ord(char)}')
+            # Lua decimal escapes consume up to three digits. Fixed width prevents
+            # a following digit from becoming part of the escape.
+            result.append(f'\\{ord(char):03d}')
         else:
             result.append(char)
     return '"' + ''.join(result) + '"'
@@ -467,7 +478,7 @@ def format_lua_value(value: Any, indent: int = 0) -> str:
             if isinstance(k, int):
                 key_str = f'[{k}]'
             else:
-                key_str = f'["{k}"]'
+                key_str = f'[{lua_escape_string(k)}]'
             
             val_str = format_lua_value(v, indent + 1)
             lines.append(f'{next_indent}{key_str} = {val_str},')
@@ -496,7 +507,7 @@ def generate_lua_output(data: Dict) -> str:
     for key in sorted(data.keys()):
         value = data[key]
         val_str = format_lua_value(value, 1)
-        lines.append(f'    ["{key}"] = {val_str},')
+        lines.append(f'    [{lua_escape_string(key)}] = {val_str},')
     
     lines.append('}')
     return '\n'.join(lines)
@@ -509,7 +520,7 @@ def _progress_sort_key(d: Dict) -> Tuple:
         pct = float(pct)
     except (TypeError, ValueError):
         pct = 0.0
-    page = d.get('current_page', 0) or 0
+    page = d.get('last_page', d.get('current_page', 0)) or 0
     try:
         page = int(page)
     except (TypeError, ValueError):
@@ -554,11 +565,19 @@ def collect_annotations(all_data: List[Dict], filepaths: List[str]) -> List[List
         filepaths: Original file paths, used only for warning messages.
 
     Returns:
-        List of annotation lists, one per file that contained annotations.
+        List of annotation lists, one per input file, including empty lists.
     """
-    all_annotations = []
+    all_annotations: List[List[Dict]] = []
     for data, filepath in zip(all_data, filepaths):
         if 'annotations' not in data:
+            legacy_keys = [key for key in ('bookmarks', 'highlight') if data.get(key)]
+            if legacy_keys:
+                raise ValueError(
+                    f"{filepath} uses legacy KOReader annotation fields "
+                    f"({', '.join(legacy_keys)}). Open and close the book in a current "
+                    "KOReader version to migrate the sidecar, then merge it again."
+                )
+            all_annotations.append([])
             continue
         annotations = data['annotations']
         if isinstance(annotations, dict):
@@ -569,9 +588,68 @@ def collect_annotations(all_data: List[Dict], filepaths: List[str]) -> List[List
                     f"{filepath}: {skipped[:5]}",
                     file=sys.stderr,
                 )
-            annotations = [annotations[k] for k in sorted(annotations.keys()) if isinstance(k, int)]
+            integer_keys = sorted(k for k in annotations.keys() if isinstance(k, int))
+            annotations = [annotations[k] for k in integer_keys]
+        elif isinstance(annotations, list):
+            annotations = list(annotations)
+        else:
+            raise ValueError(
+                f"Invalid annotations container in {filepath}: expected a Lua table"
+            )
+        for index, annotation in enumerate(annotations, 1):
+            if not isinstance(annotation, dict):
+                raise ValueError(
+                    f"Invalid annotation {index} in {filepath}: expected a Lua table"
+                )
         all_annotations.append(annotations)
     return all_annotations
+
+
+def validate_input_compatibility(all_data: List[Dict], filepaths: List[str]) -> None:
+    """Reject input combinations whose annotation positions are incompatible.
+
+    Args:
+        all_data: Parsed metadata dictionaries.
+        filepaths: Source paths in the same order as all_data.
+
+    Raises:
+        ValueError: If explicit EPUB DOM versions disagree.
+    """
+    versions: Dict[Any, List[str]] = {}
+    for data, filepath in zip(all_data, filepaths):
+        if 'cre_dom_version' in data:
+            versions.setdefault(data['cre_dom_version'], []).append(filepath)
+    if len(versions) > 1:
+        details = '; '.join(
+            f"{version}: {', '.join(paths)}" for version, paths in versions.items()
+        )
+        raise ValueError(
+            "Input files use different cre_dom_version values, so their EPUB positions "
+            f"cannot be merged safely ({details}). Open and close each book in the same "
+            "KOReader version, then retry."
+        )
+    missing_versions = []
+    for data, filepath in zip(all_data, filepaths):
+        annotations = data.get('annotations', {})
+        values: Any
+        if isinstance(annotations, dict):
+            values = annotations.values()
+        elif isinstance(annotations, list):
+            values = annotations
+        else:
+            continue
+        has_epub_positions = any(
+            isinstance(annotation, dict) and isinstance(annotation.get('pos0'), str)
+            for annotation in values
+        )
+        if has_epub_positions and 'cre_dom_version' not in data:
+            missing_versions.append(filepath)
+    if missing_versions:
+        print(
+            "Warning: EPUB position compatibility could not be verified because "
+            f"cre_dom_version is missing from: {', '.join(missing_versions)}",
+            file=sys.stderr,
+        )
 
 
 def build_output(all_data: List[Dict], merged_annotations: List[Dict],
@@ -610,15 +688,29 @@ def build_output(all_data: List[Dict], merged_annotations: List[Dict],
         i: {k: v for k, v in ann.items() if not k.startswith('_')}
         for i, ann in enumerate(merged_annotations, 1)
     }
-    output_data: Dict = {'annotations': annotations_dict}
+    output_data: Dict = {
+        'annotations': annotations_dict,
+        'annotations_externally_modified': True,
+    }
 
     # Reading progress: pick from the file with the furthest position.
     # Using most-recent timestamp alone would regress position if a device
     # was opened recently but hadn't caught up to where another device was.
     progress_source = max(all_data, key=_progress_sort_key)
-    for field in ('current_page', 'percent_finished', 'last_open'):
+    progress_fields = (
+        'current_page',
+        'last_page',
+        'last_xpointer',
+        'percent_finished',
+        'last_open',
+    )
+    for field in progress_fields:
         if field in progress_source:
             output_data[field] = progress_source[field]
+
+    dom_versions = [d['cre_dom_version'] for d in all_data if 'cre_dom_version' in d]
+    if dom_versions:
+        output_data['cre_dom_version'] = dom_versions[0]
 
     # Document metadata from the first file
     for field in ('doc_pages', 'doc_path', 'doc_props', 'partial_md5_checksum'):
@@ -670,40 +762,194 @@ def write_output(content: str, filepath: str, dry_run: bool) -> None:
             sys.exit(1)
 
 
-def _highlight_text_in_html(html_content: str, ann_text: str, color: str, note: str = '') -> str:
-    """Find ann_text in html_content and wrap it with a colored highlight span.
+def _normalise_text_with_offsets(text: str) -> Tuple[str, List[int]]:
+    """Collapse whitespace and map each normalized character to its source offset."""
+    normalized: List[str] = []
+    offsets: List[int] = []
+    pending_space = False
+    pending_offset = 0
+    for offset, char in enumerate(text):
+        if char.isspace():
+            if normalized:
+                pending_space = True
+                pending_offset = offset
+            continue
+        if pending_space:
+            normalized.append(' ')
+            offsets.append(pending_offset)
+            pending_space = False
+        normalized.append(char)
+        offsets.append(offset)
+    return ''.join(normalized), offsets
 
-    Tries exact HTML-escaped match first, then raw text match, then whitespace-normalised match.
-    Returns html_content unchanged if no match is found.
-    """
+
+def _strip_xml_namespaces(root: Any) -> None:
+    """Remove element namespaces so KOReader-style paths work with lxml XPath."""
+    from lxml import etree
+
+    for element in root.iter():
+        if isinstance(element.tag, str):
+            element.tag = etree.QName(element).localname
+
+
+def _visible_text_slots(root: Any) -> List[Tuple[Any, bool, str]]:
+    """Return visible DOM text and tail slots in document order."""
+    slots: List[Tuple[Any, bool, str]] = []
+    body_nodes = root.xpath('./body')
+    search_root = body_nodes[0] if body_nodes else root
+    for text_node in search_root.xpath('.//text()'):
+        owner = text_node.getparent()
+        if owner is None:
+            continue
+        ancestors = [str(node.tag).lower() for node in owner.iterancestors()]
+        if str(owner.tag).lower() in ('script', 'style') or any(
+            tag in ('script', 'style') for tag in ancestors
+        ):
+            continue
+        slots.append((owner, bool(text_node.is_tail), str(text_node)))
+    return slots
+
+
+def _parse_epub_position(position: Any) -> Tuple[int, str, int]:
+    """Parse a KOReader EPUB position into spine index, XPath, and offset."""
+    if not isinstance(position, str):
+        raise ValueError('EPUB position is not a string')
+    match = re.fullmatch(r'/body/DocFragment\[(\d+)\](/.*)\.(\d+)', position)
+    if not match:
+        raise ValueError(f'Unsupported EPUB position: {position}')
+    chapter_index = int(match.group(1)) - 1
+    xpath = re.sub(r'text\(\)(?!\[)', 'text()[1]', match.group(2))
+    return chapter_index, '.' + xpath, int(match.group(3))
+
+
+def _set_text_slot_pieces(
+    slot: Tuple[Any, bool, str],
+    pieces: List[Tuple[str, List[Dict], List[Dict]]],
+) -> None:
+    """Replace one DOM text slot with plain and highlighted text pieces."""
+    from lxml import etree
+
+    owner, is_tail, _ = slot
+    parent = owner.getparent() if is_tail else owner
+    if parent is None:
+        return
+    if is_tail:
+        owner.tail = ''
+        insert_at = parent.index(owner) + 1
+        last_node = owner
+    else:
+        owner.text = ''
+        insert_at = 0
+        last_node = None
+
+    for text, active, ending in pieces:
+        if not active:
+            if last_node is None:
+                owner.text = (owner.text or '') + text
+            else:
+                last_node.tail = (last_node.tail or '') + text
+            continue
+
+        outer: Any = None
+        inner: Any = None
+        for item in active:
+            span = etree.Element('span')
+            span.set('class', 'annotation-highlight')
+            span.set('style', f"background-color: {item['color']}; padding: 0 2px;")
+            if outer is None:
+                outer = span
+            else:
+                inner.append(span)
+            inner = span
+        inner.text = text
+        parent.insert(insert_at, outer)
+        insert_at += 1
+        last_node = outer
+
+        for item in ending:
+            if not item['note']:
+                continue
+            note_span = etree.Element('span')
+            note_span.set('class', 'ann-note')
+            note_span.set('title', item['note'])
+            note_span.text = '[note]'
+            note_span.tail = ' '
+            parent.insert(insert_at, note_span)
+            insert_at += 1
+            last_node = note_span
+
+
+def _apply_epub_highlights(
+    roots: List[Any],
+    chapter_slots: List[List[Tuple[Any, bool, str]]],
+    chapter_intervals: List[List[Dict]],
+) -> None:
+    """Apply resolved annotation intervals to parsed EPUB chapter trees."""
+    del roots  # Roots own the slots; the explicit parameter documents that relationship.
+    for slots, intervals in zip(chapter_slots, chapter_intervals):
+        if not intervals:
+            continue
+        cursor = 0
+        for slot in slots:
+            slot_text = slot[2]
+            slot_start = cursor
+            slot_end = cursor + len(slot_text)
+            cursor = slot_end
+            touching = [
+                item for item in intervals
+                if item['start'] < slot_end and item['end'] > slot_start
+            ]
+            if not touching:
+                continue
+            boundaries = {0, len(slot_text)}
+            for item in touching:
+                boundaries.add(max(0, item['start'] - slot_start))
+                boundaries.add(min(len(slot_text), item['end'] - slot_start))
+            ordered = sorted(boundaries)
+            pieces = []
+            for start, end in zip(ordered, ordered[1:]):
+                if start == end:
+                    continue
+                global_start = slot_start + start
+                global_end = slot_start + end
+                active = [
+                    item for item in touching
+                    if item['start'] <= global_start and item['end'] >= global_end
+                ]
+                active.sort(key=lambda item: item['order'])
+                ending = [item for item in active if item['end'] == global_end]
+                pieces.append((slot_text[start:end], active, ending))
+            _set_text_slot_pieces(slot, pieces)
+
+
+def _highlight_text_in_html(
+    html_content: str, ann_text: str, color: str, note: str = ''
+) -> str:
+    """Highlight one unique visible-text match without modifying HTML attributes."""
     if not ann_text:
         return html_content
-
-    note_html = ''
-    if note:
-        note_escaped = html_module.escape(note, quote=True)
-        note_html = f' <span class="ann-note" title="{note_escaped}">[note]</span>'
-
-    def make_span(inner: str) -> str:
-        return (
-            f'<span style="background-color: {color}; padding: 0 2px;">'
-            f'{inner}</span>{note_html}'
-        )
-
-    escaped_text = html_module.escape(ann_text)
-    if escaped_text in html_content:
-        return html_content.replace(escaped_text, make_span(escaped_text), 1)
-
-    if ann_text in html_content:
-        return html_content.replace(ann_text, make_span(html_module.escape(ann_text)), 1)
-
-    # Whitespace-normalised fallback
-    normalised = re.sub(r'\s+', ' ', ann_text).strip()
-    normalised_escaped = html_module.escape(normalised)
-    if normalised_escaped in html_content:
-        return html_content.replace(normalised_escaped, make_span(normalised_escaped), 1)
-
-    return html_content
+    try:
+        from lxml import html
+    except ImportError:
+        return html_content
+    root = html.fragment_fromstring(html_content, create_parent='body')
+    slots = _visible_text_slots(root)
+    raw_text = ''.join(slot[2] for slot in slots)
+    normalized, offsets = _normalise_text_with_offsets(raw_text)
+    needle = re.sub(r'\s+', ' ', ann_text).strip()
+    start = normalized.find(needle)
+    if not needle or start < 0 or normalized.find(needle, start + 1) >= 0:
+        return html_content
+    end = start + len(needle)
+    interval = {
+        'start': offsets[start],
+        'end': offsets[end - 1] + 1,
+        'color': color,
+        'note': note,
+        'order': 0,
+    }
+    _apply_epub_highlights([root], [slots], [[interval]])
+    return ''.join(html.tostring(child, encoding='unicode') for child in root)
 
 
 def render_annotated_html(
@@ -730,6 +976,7 @@ def render_annotated_html(
     try:
         import ebooklib
         from ebooklib import epub
+        from lxml import etree
     except ImportError:
         print(
             "Error: --render-html requires 'ebooklib'.\n"
@@ -739,17 +986,6 @@ def render_annotated_html(
         sys.exit(1)
 
     device_colors = {i: DEVICE_COLORS[i % len(DEVICE_COLORS)] for i in range(len(file_list))}
-
-    # Collect (text, color, note) tuples — skip annotations without text
-    ann_data: List[Tuple[str, str, str]] = []
-    for ann in annotations:
-        text = ann.get('text', '')
-        if not text:
-            continue
-        device_idx = ann.get('_device_index', 0)
-        color = device_colors.get(device_idx, DEVICE_COLORS[0])
-        note = ann.get('note', '') or ''
-        ann_data.append((text, color, note))
 
     # Build legend HTML
     legend_rows = []
@@ -769,22 +1005,154 @@ def render_annotated_html(
         + '\n</div>\n<hr style="margin: 20px 0;">\n'
     )
 
-    # Process epub chapters and apply highlights
+    # Parse EPUB chapters in spine order. CREngine builds DocFragment indexes from
+    # this same order, so saved annotation paths map directly to these documents.
     book = epub.read_epub(epub_path)
-    chapter_htmls: List[str] = []
-    matched_total = 0
-    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-        content = item.get_content().decode('utf-8', errors='replace')
-        for ann_text, color, note in ann_data:
-            new_content = _highlight_text_in_html(content, ann_text, color, note)
-            if new_content is not content and verbose:
-                print(f"  Highlighted: {ann_text[:60]!r}")
-                matched_total += 1
-            content = new_content
-        chapter_htmls.append(content)
+    roots: List[Any] = []
+    chapter_slots: List[List[Tuple[Any, bool, str]]] = []
+    chapter_texts: List[str] = []
+    slot_offsets: List[Dict[Tuple[int, bool], int]] = []
+    for item_id, _linear in book.spine:
+        item = book.get_item_with_id(item_id)
+        if item is None or item.get_type() != ebooklib.ITEM_DOCUMENT:
+            continue
+        try:
+            root = etree.fromstring(item.get_content())
+        except etree.XMLSyntaxError:
+            # Browsers and KOReader accept many EPUB chapters that are HTML-valid
+            # but not well-formed XML, so retain a tolerant rendering fallback.
+            from lxml import html as lxml_html
 
-    if verbose:
-        print(f"  {matched_total}/{len(ann_data)} annotations matched in epub text")
+            root = lxml_html.fromstring(item.get_content())
+        _strip_xml_namespaces(root)
+        slots = _visible_text_slots(root)
+        offsets: Dict[Tuple[int, bool], int] = {}
+        cursor = 0
+        for owner, is_tail, text in slots:
+            offsets[(id(owner), is_tail)] = cursor
+            cursor += len(text)
+        roots.append(root)
+        chapter_slots.append(slots)
+        chapter_texts.append(''.join(slot[2] for slot in slots))
+        slot_offsets.append(offsets)
+
+    chapter_intervals: List[List[Dict]] = [[] for _root in roots]
+    matched_total = 0
+    unmatched_total = 0
+    ambiguous_total = 0
+
+    for order, ann in enumerate(annotations):
+        ann_text = ann.get('text', '')
+        if not ann_text or not isinstance(ann.get('pos0'), str) or not isinstance(
+            ann.get('pos1'), str
+        ):
+            continue
+        device_idx = ann.get('_device_index', 0)
+        interval_base = {
+            'color': device_colors.get(device_idx, DEVICE_COLORS[0]),
+            'note': ann.get('note', '') or '',
+            'order': order,
+        }
+        resolved: List[Tuple[int, int]] = []
+        chapter_hint = None
+        try:
+            for position in (ann['pos0'], ann['pos1']):
+                chapter_index, xpath, offset = _parse_epub_position(position)
+                chapter_hint = chapter_index
+                if chapter_index < 0 or chapter_index >= len(roots):
+                    raise ValueError('EPUB position refers to a missing spine item')
+                matches = roots[chapter_index].xpath(xpath)
+                if len(matches) != 1 or not hasattr(matches[0], 'getparent'):
+                    raise ValueError('EPUB text node did not resolve uniquely')
+                text_node = matches[0]
+                key = (id(text_node.getparent()), bool(text_node.is_tail))
+                base_offset = slot_offsets[chapter_index][key]
+                if offset < 0 or offset > len(str(text_node)):
+                    raise ValueError('EPUB text offset is out of range')
+                resolved.append((chapter_index, base_offset + offset))
+        except (KeyError, ValueError, IndexError, etree.XPathError):
+            resolved = []
+
+        ranges: List[Tuple[int, int, int]] = []
+        if len(resolved) == 2 and resolved[0] <= resolved[1]:
+            start_chapter, start_offset = resolved[0]
+            end_chapter, end_offset = resolved[1]
+            selected_parts = []
+            for chapter_index in range(start_chapter, end_chapter + 1):
+                part_start = start_offset if chapter_index == start_chapter else 0
+                part_end = end_offset if chapter_index == end_chapter else len(
+                    chapter_texts[chapter_index]
+                )
+                selected_parts.append(chapter_texts[chapter_index][part_start:part_end])
+                if part_start < part_end:
+                    ranges.append((chapter_index, part_start, part_end))
+            selected = ''.join(selected_parts)
+            if re.sub(r'\s+', ' ', selected).strip() != re.sub(
+                r'\s+', ' ', ann_text
+            ).strip():
+                ranges = []
+
+        if not ranges:
+            needle = re.sub(r'\s+', ' ', ann_text).strip()
+            candidates: List[Tuple[int, int, int]] = []
+            search_chapters = (
+                [chapter_hint]
+                if chapter_hint is not None and 0 <= chapter_hint < len(roots)
+                else list(range(len(roots)))
+            )
+            for chapter_index in search_chapters:
+                normalized, normalized_offsets = _normalise_text_with_offsets(
+                    chapter_texts[chapter_index]
+                )
+                start = normalized.find(needle)
+                while needle and start >= 0:
+                    end = start + len(needle)
+                    candidates.append(
+                        (
+                            chapter_index,
+                            normalized_offsets[start],
+                            normalized_offsets[end - 1] + 1,
+                        )
+                    )
+                    start = normalized.find(needle, start + 1)
+            if len(candidates) == 1:
+                ranges = candidates
+            elif len(candidates) > 1:
+                ambiguous_total += 1
+                if verbose:
+                    print(f"  Ambiguous, skipped: {ann_text[:60]!r}")
+                continue
+            else:
+                unmatched_total += 1
+                if verbose:
+                    print(f"  Unmatched: {ann_text[:60]!r}")
+                continue
+
+        for range_index, (chapter_index, start, end) in enumerate(ranges):
+            interval = dict(interval_base)
+            interval.update({'start': start, 'end': end})
+            if range_index != len(ranges) - 1:
+                interval['note'] = ''
+            chapter_intervals[chapter_index].append(interval)
+        matched_total += 1
+        if verbose:
+            print(f"  Highlighted: {ann_text[:60]!r}")
+
+    _apply_epub_highlights(roots, chapter_slots, chapter_intervals)
+
+    chapter_htmls: List[str] = []
+    for root in roots:
+        body_nodes = root.xpath('./body')
+        body = body_nodes[0] if body_nodes else root
+        serialized = etree.tostring(body, encoding='unicode', method='html')
+        body_start = serialized.find('>') + 1
+        body_end = serialized.rfind('</body>')
+        chapter_htmls.append(serialized[body_start:body_end] if body_end >= 0 else serialized)
+
+    print(
+        f"  EPUB annotations: {matched_total} matched, {unmatched_total} unmatched, "
+        f"{ambiguous_total} ambiguous"
+    )
 
     combined_body = '\n<hr style="margin: 30px 0;">\n'.join(chapter_htmls)
     full_html = (
@@ -834,74 +1202,99 @@ def render_annotated_pdf(
 
     device_colors = {i: DEVICE_COLORS[i % len(DEVICE_COLORS)] for i in range(len(file_list))}
 
-    # Group annotations by page number (1-indexed); skip those without pboxes
-    page_annotations: Dict[int, List[Dict]] = {}
+    # Group annotations by page number (1-indexed). Multi-page PDF highlights
+    # store per-page boxes under ext[page].pboxes rather than at top level.
+    page_annotations: Dict[int, List[Tuple[Dict, Any]]] = {}
     for ann in annotations:
-        if not ann.get('pboxes'):
-            continue
-        pageno = ann.get('pageno') or ann.get('page')
-        if pageno is None:
-            continue
-        page_annotations.setdefault(int(pageno), []).append(ann)
+        extension = ann.get('ext')
+        if isinstance(extension, dict) and extension:
+            for page_key, page_part in extension.items():
+                if not isinstance(page_part, dict) or not page_part.get('pboxes'):
+                    continue
+                try:
+                    pageno = int(page_key)
+                except (TypeError, ValueError):
+                    continue
+                page_annotations.setdefault(pageno, []).append(
+                    (ann, page_part['pboxes'])
+                )
+        elif ann.get('pboxes'):
+            page_value = ann.get('pageno') or ann.get('page')
+            if page_value is not None:
+                try:
+                    page_annotations.setdefault(int(page_value), []).append(
+                        (ann, ann['pboxes'])
+                    )
+                except (TypeError, ValueError):
+                    continue
 
     doc = fitz.open(pdf_path)
     total_pages = doc.page_count
     rendered = 0
     skipped_oob = 0
 
-    for pageno, ann_list in page_annotations.items():
-        # PyMuPDF uses 0-indexed pages
-        page_idx = pageno - 1
-        if page_idx < 0 or page_idx >= total_pages:
-            if verbose:
-                print(f"  Warning: page {pageno} out of range (PDF has {total_pages} pages), skipping")
-            skipped_oob += len(ann_list)
-            continue
+    try:
+        for pageno, ann_list in page_annotations.items():
+            # PyMuPDF uses 0-indexed pages
+            page_idx = pageno - 1
+            if page_idx < 0 or page_idx >= total_pages:
+                if verbose:
+                    print(
+                        f"  Warning: page {pageno} out of range "
+                        f"(PDF has {total_pages} pages), skipping"
+                    )
+                skipped_oob += len(ann_list)
+                continue
 
-        page = doc[page_idx]
-        for ann in ann_list:
-            device_idx = ann.get('_device_index', 0)
-            rgb = _hex_to_rgb(device_colors[device_idx])
-            pboxes = ann['pboxes']
-            # pboxes is parsed as {1: {...}, 2: {...}} by the Lua parser
-            pb_list = pboxes.values() if isinstance(pboxes, dict) else pboxes
-            rects = [
-                fitz.Rect(pb['x'], pb['y'], pb['x'] + pb['w'], pb['y'] + pb['h'])
-                for pb in pb_list
-            ]
-            highlight = page.add_highlight_annot(quads=rects)
-            highlight.set_colors(stroke=rgb)
-            highlight.set_opacity(0.5)
-            note = ann.get('note', '') or ''
-            if note:
-                highlight.set_info(content=note)
-            highlight.update()
-            rendered += 1
-            if verbose:
-                text_preview = (ann.get('text') or '')[:60]
-                print(f"  Page {pageno}: highlighted {text_preview!r}")
+            page = doc[page_idx]
+            for ann, pboxes in ann_list:
+                device_idx = ann.get('_device_index', 0)
+                color = device_colors.get(device_idx, DEVICE_COLORS[0])
+                rgb = _hex_to_rgb(color)
+                # pboxes is parsed as {1: {...}, 2: {...}} by the Lua parser
+                pb_list = pboxes.values() if isinstance(pboxes, dict) else pboxes
+                rects = [
+                    fitz.Rect(pb['x'], pb['y'], pb['x'] + pb['w'], pb['y'] + pb['h'])
+                    for pb in pb_list
+                ]
+                if not rects:
+                    continue
+                highlight = page.add_highlight_annot(quads=rects)
+                highlight.set_colors(stroke=rgb)
+                highlight.set_opacity(0.5)
+                note = ann.get('note', '') or ''
+                if note:
+                    highlight.set_info(content=note)
+                highlight.update()
+                rendered += 1
+                if verbose:
+                    text_preview = (ann.get('text') or '')[:60]
+                    print(f"  Page {pageno}: highlighted {text_preview!r}")
 
-    if skipped_oob and not verbose:
-        print(f"  Warning: {skipped_oob} annotation(s) skipped (page out of range)")
+        if skipped_oob and not verbose:
+            print(f"  Warning: {skipped_oob} annotation(s) skipped (page out of range)")
 
-    # Insert legend page at position 0
-    legend = doc.new_page(pno=0, width=612, height=792)
-    legend.insert_text((72, 72), "Annotation Sources", fontsize=18, fontname="helv")
-    for i, filepath in enumerate(file_list):
-        y_pos = 110 + i * 30
-        rgb = _hex_to_rgb(device_colors[i])
-        swatch = fitz.Rect(72, y_pos, 112, y_pos + 18)
-        legend.draw_rect(swatch, color=rgb, fill=rgb, fill_opacity=0.5)
-        legend.insert_text((120, y_pos + 14), os.path.basename(filepath), fontsize=12, fontname="helv")
+        # Insert legend page at position 0
+        legend = doc.new_page(pno=0, width=612, height=792)
+        legend.insert_text((72, 72), "Annotation Sources", fontsize=18, fontname="helv")
+        for i, filepath in enumerate(file_list):
+            y_pos = 110 + i * 30
+            rgb = _hex_to_rgb(device_colors[i])
+            swatch = fitz.Rect(72, y_pos, 112, y_pos + 18)
+            legend.draw_rect(swatch, color=rgb, fill=rgb, fill_opacity=0.5)
+            legend.insert_text(
+                (120, y_pos + 14), os.path.basename(filepath), fontsize=12, fontname="helv"
+            )
 
-    doc.save(pdf_output_path, garbage=4, deflate=True)
-    doc.close()
+        doc.save(pdf_output_path, garbage=4, deflate=True)
+    finally:
+        doc.close()
 
     if verbose:
         print(f"  {rendered} annotation(s) rendered across {len(page_annotations)} page(s)")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description='Merge KOReader annotations from multiple devices.',
         epilog='Example: %(prog)s device1.lua device2.lua -o merged.lua'
@@ -982,7 +1375,12 @@ def main():
             parser.error(f'PDF file not found: {args.pdf}')
 
     all_data = load_all_data(args.files, verbose=args.verbose)
-    all_annotations = collect_annotations(all_data, args.files)
+    try:
+        validate_input_compatibility(all_data, args.files)
+        all_annotations = collect_annotations(all_data, args.files)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
     # Tag each annotation with its source device index so the PDF renderer can colour-code it
     for device_idx, ann_list in enumerate(all_annotations):
@@ -1007,8 +1405,16 @@ def main():
     output_content = generate_lua_output(output_data)
     write_output(output_content, args.output, dry_run=args.dry_run)
 
+    html_path: str = args.html_output or os.path.splitext(args.output)[0] + '.html'
+    pdf_out_path: str = args.pdf_output or os.path.splitext(args.output)[0] + '.pdf'
+    if args.dry_run:
+        if args.render_html:
+            print(f"  Would render HTML to: {html_path}")
+        if args.render_pdf:
+            print(f"  Would render annotated PDF to: {pdf_out_path}")
+        return
+
     if args.render_html:
-        html_path: str = args.html_output or os.path.splitext(args.output)[0] + '.html'
         render_annotated_html(
             epub_path=args.epub,
             html_output_path=html_path,
@@ -1019,7 +1425,6 @@ def main():
         print(f"HTML written to: {html_path}")
 
     if args.render_pdf:
-        pdf_out_path: str = args.pdf_output or os.path.splitext(args.output)[0] + '.pdf'
         render_annotated_pdf(
             pdf_path=args.pdf,
             pdf_output_path=pdf_out_path,

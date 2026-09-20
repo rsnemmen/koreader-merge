@@ -47,7 +47,13 @@ It ignores display settings, avoiding conflicts between devices with different s
 merge_koreader.py <file1.lua> <file2.lua> [file3.lua ...] -o <output.lua>
 ```
 
-Use `-v` for verbose output (shows duplicate count) or `-n` / `--dry-run` to preview without writing.
+Use `-v` for verbose output (shows duplicate count and per-annotation rendering details) or
+`-n` / `--dry-run` to preview every requested output without writing Lua, HTML, or PDF files.
+
+Inputs must use KOReader's current `annotations` format. If a sidecar still contains the legacy
+`bookmarks` or `highlight` tables, open and close that book in a current KOReader release before
+merging. EPUB sidecars must also agree on `cre_dom_version`; the script stops with migration
+guidance instead of combining incompatible saved positions.
 
 ### Example
 
@@ -70,7 +76,11 @@ merge_koreader.py \
   --render-html --epub ~/books/mybook.epub
 ```
 
-A colour legend at the top of the page maps each highlight colour to its source file. Annotations that carry a note show an inline `[note]` label (hover for the note text). Use `--html-output path/to/output.html` to set a custom output path (default: same name as the output `.lua` with a `.html` extension).
+A colour legend at the top of the page maps each highlight colour to its source file. Annotations
+that carry a note show an inline `[note]` label (hover for the note text). Rendering follows the
+EPUB spine and saved KOReader positions, so passages split by inline formatting are supported.
+Ambiguous or unmatched fallback text is skipped and reported. Use `--html-output
+path/to/output.html` to set a custom output path (default: the output `.lua` name with `.html`).
 
 This feature requires one optional dependency:
 
@@ -90,7 +100,11 @@ merge_koreader.py \
   --render-pdf --pdf ~/books/mybook.pdf
 ```
 
-Each source device gets a distinct highlight colour. Notes are attached as popup annotations (visible on hover in most PDF readers). A legend page is inserted at the start of the document mapping each colour to its source file. Use `--pdf-output path/to/output.pdf` to set a custom output path (default: same name as the output `.lua` with a `.pdf` extension).
+Each source device gets a distinct highlight colour. Notes are attached as popup annotations
+(visible on hover in most PDF readers), including every page segment of a multi-page highlight. A
+legend page is inserted at the start of the document mapping each colour to its source file. Use
+`--pdf-output path/to/output.pdf` to set a custom output path (default: the output `.lua` name with
+`.pdf`).
 
 This feature requires one optional dependency:
 
@@ -100,9 +114,12 @@ pip install PyMuPDF
 
 ## Behavior
 
-- **Merged**: Highlights, bookmarks, notes, and reading progress
+- **Merged**: Highlights, bookmarks, notes, and the furthest compatible reading position
 - **Deduplicated**: Identical annotations are not duplicated
 - **Not preserved**: Display settings (font size, margins, line spacing, etc.)
+
+The output is marked as externally modified so KOReader refreshes page numbers and annotation
+ordering when it opens the merged sidecar.
 
 When opening a book with the merged file, KOReader applies settings in this order: 1. Per-book sidecar settings → 2. Directory defaults → 3. Global defaults
 

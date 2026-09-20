@@ -36,8 +36,8 @@ INSTALL_PATH="$INSTALL_DIR/$CMD_NAME"
 echo "Downloading ${CMD_NAME}..."
 curl -fsSL "$SCRIPT_URL" -o "$INSTALL_PATH"
 
-# Fix shebang to use generic python
-sed -i.bak '1s|#!.*python.*|#!/usr/bin/env python|' "$INSTALL_PATH"
+# Use the interpreter command that passed the version check above.
+sed -i.bak "1s|#!.*python.*|#!/usr/bin/env ${PYTHON}|" "$INSTALL_PATH"
 rm -f "${INSTALL_PATH}.bak"
 
 # Make executable
@@ -50,8 +50,8 @@ echo "Usage:"
 echo "  ${CMD_NAME} file1.lua file2.lua -o output.lua"
 echo ""
 echo "Optional features:"
-echo "  pip install ebooklib   # for --render-html"
-echo "  pip install PyMuPDF    # for --render-pdf"
+echo "  ${PYTHON} -m pip install ebooklib   # for --render-html"
+echo "  ${PYTHON} -m pip install PyMuPDF    # for --render-pdf"
 
 # Warn if ~/.local/bin is not on PATH
 if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then

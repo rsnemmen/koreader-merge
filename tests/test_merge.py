@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
@@ -13,12 +14,19 @@ from merge_koreader import (
     annotation_key,
     build_output,
     collect_annotations,
+    format_lua_value,
     generate_lua_output,
+    lua_escape_string,
+    main,
     merge_annotations,
     parse_lua_file,
     parse_lua_string,
     parse_lua_table,
     parse_lua_value,
+    render_annotated_html,
+    render_annotated_pdf,
+    validate_input_compatibility,
+    _highlight_text_in_html,
     _progress_sort_key,
 )
 
@@ -180,6 +188,19 @@ class TestRoundTrip:
         assert reparsed['doc_path'] == data_a['doc_path']
         assert reparsed['doc_pages'] == data_a['doc_pages']
 
+    def test_control_character_before_digit_round_trips(self):
+        value = '\x011\x0012\x1f9'
+        encoded = lua_escape_string(value)
+        decoded, _ = parse_lua_string(encoded, 0)
+        assert decoded == value
+        assert '\\0011' in encoded
+
+    def test_escaped_dictionary_keys_round_trip(self):
+        value = {'quote"key': 'a', 'slash\\key': 'b'}
+        encoded = format_lua_value(value)
+        decoded, _ = parse_lua_table(encoded, 0)
+        assert decoded == value
+
 
 # ---------------------------------------------------------------------------
 # Merge / deduplication tests
@@ -248,6 +269,56 @@ class TestMergeAnnotations:
         assert dupes == 1
         assert len(merged) == 3
 
+    def test_pdf_zoom_and_rotation_do_not_change_identity(self):
+        first = self._ann(10.0, 100.0, 1, '2024-01-01 00:00:00')
+        first['pos0'].update({'zoom': 1.0, 'rotation': 0})
+        first['pos1'].update({'zoom': 1.0, 'rotation': 0})
+        second = {**first, 'datetime_updated': '2024-01-02 00:00:00'}
+        second['pos0'] = {**first['pos0'], 'zoom': 2.0, 'rotation': 90}
+        second['pos1'] = {**first['pos1'], 'zoom': 2.0, 'rotation': 90}
+        assert annotation_key(first) == annotation_key(second)
+        merged, duplicates = merge_annotations([[first], [second]])
+        assert len(merged) == 1
+        assert duplicates == 1
+        assert merged[0]['datetime_updated'] == '2024-01-02 00:00:00'
+
+    def test_annotations_sort_by_page_before_kind(self):
+        early_bookmark = {'page': 2, 'chapter': 'Early'}
+        late_highlight = self._ann(10.0, 100.0, 50, '2024-01-01 00:00:00')
+        merged, _ = merge_annotations([[late_highlight, early_bookmark]])
+        assert merged == [early_bookmark, late_highlight]
+
+
+class TestCollectAnnotations:
+    def test_preserves_one_group_per_input(self, capsys):
+        annotation = {'page': 1}
+        groups = collect_annotations(
+            [{}, {'annotations': {1: annotation, 'metadata': {}}}],
+            ['empty.lua', 'annotated.lua'],
+        )
+        assert groups == [[], [annotation]]
+        assert 'non-integer annotation key' in capsys.readouterr().err
+
+    def test_rejects_legacy_annotation_format(self):
+        with pytest.raises(ValueError, match='legacy KOReader annotation fields'):
+            collect_annotations([{'bookmarks': {1: {'page': 1}}}], ['legacy.lua'])
+
+    def test_rejects_malformed_annotation_entries(self):
+        with pytest.raises(ValueError, match='Invalid annotation 1'):
+            collect_annotations([{'annotations': {1: 'bad'}}], ['bad.lua'])
+
+    def test_rejects_conflicting_dom_versions(self):
+        with pytest.raises(ValueError, match='different cre_dom_version'):
+            validate_input_compatibility(
+                [{'cre_dom_version': 1}, {'cre_dom_version': 2}],
+                ['a.lua', 'b.lua'],
+            )
+
+    def test_warns_when_epub_dom_version_is_missing(self, capsys):
+        data = {'annotations': {1: {'pos0': '/body/DocFragment[1]/body/p/text().0'}}}
+        validate_input_compatibility([data], ['missing-version.lua'])
+        assert 'compatibility could not be verified' in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
 # Reading progress selection
@@ -274,6 +345,11 @@ class TestProgressSortKey:
         data_b = parse_lua_file(DEVICE_B)
         # device_b is at 18%, device_a is at 5%
         assert max([data_a, data_b], key=_progress_sort_key) is data_b
+
+    def test_uses_last_page_for_paged_documents(self):
+        behind = {'percent_finished': 0.1, 'last_page': 5}
+        ahead = {'percent_finished': 0.1, 'last_page': 10}
+        assert max([behind, ahead], key=_progress_sort_key) is ahead
 
 
 # ---------------------------------------------------------------------------
@@ -317,3 +393,146 @@ class TestBuildOutput:
         build_output(all_data, merged, highlights, len(merged) - highlights, notes)
         captured = capsys.readouterr()
         assert 'partial_md5_checksum' in captured.err
+
+    def test_preserves_resume_and_refresh_metadata(self):
+        sources = [
+            {'annotations': {}, 'percent_finished': 0.1, 'last_page': 10},
+            {
+                'annotations': {},
+                'percent_finished': 0.5,
+                'last_xpointer': '/body/DocFragment[2]/body/p/text().3',
+                'cre_dom_version': 20240114,
+            },
+        ]
+        out = build_output(sources, [], 0, 0, 0)
+        assert out['last_xpointer'].endswith('text().3')
+        assert out['cre_dom_version'] == 20240114
+        assert out['annotations_externally_modified'] is True
+
+
+class TestCliBehavior:
+    def test_dry_run_never_writes_or_renders(self, tmp_path, capsys):
+        epub_path = tmp_path / 'book.epub'
+        pdf_path = tmp_path / 'book.pdf'
+        epub_path.write_bytes(b'placeholder')
+        pdf_path.write_bytes(b'placeholder')
+        output_path = tmp_path / 'merged.lua'
+        argv = [
+            'merge_koreader.py', DEVICE_A, '-o', str(output_path), '--dry-run',
+            '--epub', str(epub_path), '--pdf', str(pdf_path),
+        ]
+        with patch.object(sys, 'argv', argv), patch(
+            'merge_koreader.render_annotated_html'
+        ) as render_html, patch('merge_koreader.render_annotated_pdf') as render_pdf:
+            main()
+        assert not output_path.exists()
+        render_html.assert_not_called()
+        render_pdf.assert_not_called()
+        output = capsys.readouterr().out
+        assert 'Would render HTML' in output
+        assert 'Would render annotated PDF' in output
+
+
+class TestHtmlRendering:
+    def test_visible_text_matching_preserves_attributes_and_inline_markup(self):
+        source = '<p title="Hello world">Hello <em>world</em></p>'
+        rendered = _highlight_text_in_html(source, 'Hello world', '#FFFF99', 'note')
+        assert 'title="Hello world"' in rendered
+        assert '<em><span' in rendered
+        assert rendered.count('annotation-highlight') == 2
+        assert rendered.count('ann-note') == 1
+
+    def test_ambiguous_visible_text_is_unchanged(self):
+        source = '<p>repeat me and repeat me</p>'
+        assert _highlight_text_in_html(source, 'repeat me', '#FFFF99') == source
+
+    def test_epub_uses_spine_positions_and_skips_ambiguous_fallback(self, tmp_path, capsys):
+        ebooklib = pytest.importorskip('ebooklib')
+        from ebooklib import epub
+        from lxml import html
+
+        book = epub.EpubBook()
+        book.set_identifier('test-book')
+        book.set_title('Test Book')
+        book.set_language('en')
+        later = epub.EpubHtml(uid='later', file_name='later.xhtml', title='Later')
+        later.content = '<html><body><p>Manifest first.</p></body></html>'
+        first = epub.EpubHtml(uid='first', file_name='first.xhtml', title='First')
+        first.content = (
+            '<html><body><p>Spine first has <em>inline text</em>.</p>'
+            '<p>repeat me and repeat me</p></body></html>'
+        )
+        book.add_item(later)
+        book.add_item(first)
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        book.spine = [first, later]
+        epub_path = tmp_path / 'book.epub'
+        output_path = tmp_path / 'rendered.html'
+        epub.write_epub(str(epub_path), book)
+        annotations = [
+            {
+                'text': 'Spine first has inline text',
+                'note': 'inline note',
+                'pos0': '/body/DocFragment[1]/body/p[1]/text().0',
+                'pos1': '/body/DocFragment[1]/body/p[1]/em/text().11',
+                '_device_index': 0,
+            },
+            {
+                'text': 'repeat me',
+                'pos0': '/body/DocFragment[1]/body/p[99]/text().0',
+                'pos1': '/body/DocFragment[1]/body/p[99]/text().9',
+                '_device_index': 0,
+            },
+        ]
+        render_annotated_html(
+            str(epub_path), str(output_path), annotations, ['device.lua']
+        )
+        rendered = output_path.read_text(encoding='utf-8')
+        document = html.fromstring(rendered)
+        assert len(document.xpath('//html')) == 1
+        assert len(document.xpath('//span[@class="ann-note"]')) == 1
+        assert rendered.index('Spine first') < rendered.index('Manifest first')
+        summary = capsys.readouterr().out
+        assert '1 matched, 0 unmatched, 1 ambiguous' in summary
+        assert ebooklib.ITEM_DOCUMENT
+
+
+class TestPdfRendering:
+    def test_renders_each_page_of_extended_highlight(self, tmp_path):
+        fitz = pytest.importorskip('fitz')
+        source_path = tmp_path / 'source.pdf'
+        output_path = tmp_path / 'output.pdf'
+        source = fitz.open()
+        source.new_page()
+        source.new_page()
+        source.save(str(source_path))
+        source.close()
+        boxes = {1: {'x': 20, 'y': 20, 'w': 100, 'h': 20}}
+        annotation = {
+            'text': 'two pages',
+            'note': 'popup note',
+            'pos0': {'page': 1, 'x': 20, 'y': 20},
+            'pos1': {'page': 2, 'x': 120, 'y': 40},
+            'ext': {1: {'pboxes': boxes}, 2: {'pboxes': boxes}},
+            '_device_index': 0,
+        }
+        render_annotated_pdf(
+            str(source_path), str(output_path), [annotation], ['device.lua']
+        )
+        rendered = fitz.open(str(output_path))
+        try:
+            assert rendered.page_count == 3
+            annotations = [list(rendered[index].annots() or []) for index in (1, 2)]
+            assert [len(items) for items in annotations] == [1, 1]
+            assert all(items[0].info['content'] == 'popup note' for items in annotations)
+        finally:
+            rendered.close()
+
+
+def test_installer_uses_validated_python_command():
+    installer_path = os.path.join(os.path.dirname(__file__), '..', 'install.sh')
+    with open(installer_path, encoding='utf-8') as installer_file:
+        installer = installer_file.read()
+    assert '#!/usr/bin/env ${PYTHON}' in installer
+    assert '${PYTHON} -m pip install ebooklib' in installer
